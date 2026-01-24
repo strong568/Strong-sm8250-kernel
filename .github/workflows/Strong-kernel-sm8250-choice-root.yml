@@ -40,106 +40,115 @@ jobs:
 
       - name: Clone Kernel Source
         run: |
-          git clone --depth=1 ${{ github.event.inputs.KERNEL_TREE || 'https://github.com/EmanuelCN/kernel_xiaomi_sm8250' }} -b staging $GITHUB_WORKSPACE/kernel
+          git clone --depth=1 https://github.com/EmanuelCN/kernel_xiaomi_sm8250 -b staging $GITHUB_WORKSPACE/kernel
           cd $GITHUB_WORKSPACE/kernel
           echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(date +'%Y-%m-%d %H:%M')" >> $GITHUB_ENV
 
       - name: Integrate Root & SUSFS
         run: |
           cd $GITHUB_WORKSPACE/kernel
           
-          # 1. Xử lý lựa chọn Root (Sửa lỗi pathspec main)
+          # 1. Cài đặt Root
           case "${{ github.event.inputs.ROOT_CHOICE }}" in
-            "KSU_Next")
-              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || exit 1
+            "KSU_Next"|"RKSU")
+              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
               ;;
             "SukiSU_Ultra")
-              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
-              ;;
-            "RKSU")
-              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || exit 1
+              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
               ;;
           esac
 
-          # 2. Xử lý lựa chọn SUSFS (Dùng ZIP để tránh lỗi Git Auth 128)
+          # 2. Xử lý SUSFS (Bypass Git Auth 128 bằng ZIP)
           if [ "${{ github.event.inputs.USE_SUSFS }}" = "true" ]; then
-            mkdir -p $GITHUB_WORKSPACE/susfs_tmp
-            cd $GITHUB_WORKSPACE/susfs_tmp
-            # Tải SUSFS bản mới nhất qua ZIP thay vì git clone
+            cd $GITHUB_WORKSPACE
+            mkdir -p susfs_source && cd susfs_source
             curl -L https://github.com/rifsxd/susfs4ksu/archive/refs/heads/next.zip -o susfs.zip
-            unzip susfs.zip && mv susfs4ksu-next/* .
+            unzip -q susfs.zip
+            SUSFS_DIR="$GITHUB_WORKSPACE/susfs_source/susfs4ksu-next"
             
             cd $GITHUB_WORKSPACE/kernel
-            cp $GITHUB_WORKSPACE/susfs_tmp/kernel/include/linux/susfs.h include/linux/
-            cp $GITHUB_WORKSPACE/susfs_tmp/kernel/fs/susfs.c fs/
+            cp $SUSFS_DIR/kernel/include/linux/susfs.h include/linux/
+            cp $SUSFS_DIR/kernel/fs/susfs.c fs/
             
-            # Patch KernelSU để nhận diện SUSFS
+            # Patch KernelSU Drivers
             if [ -d "drivers/kernelsu" ]; then
               cd drivers/kernelsu
-              patch -p1 < $GITHUB_WORKSPACE/susfs_tmp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || echo "Manual patch failed, checking fallback..."
+              patch -p1 < $SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || echo "KSU patch failed"
+              cd ../..
+            fi
+            
+            # 3. Manual SED Patch (Cấu trúc Kernel 4.19 SM8250)
+            echo "[+] Applying manual system patches..."
+            sed -i '/filename = getname(filename_user);/a #ifdef CONFIG_SUSFS\n	if (current->susfs_task_state & SUSFS_TASK_STATE_BIT_IS_SUS_ID) {\n		if (!IS_ERR(filename)) {\n			susfs_is_sus_path(filename->name);\n		}\n	}\n#endif' fs/open.c
+            sed -i '/error = vfs_getattr(&path, stat, request_mask, query_flags);/i #ifdef CONFIG_SUSFS\n	if (current->susfs_task_state & SUSFS_TASK_STATE_BIT_IS_SUS_ID) {\n		susfs_is_sus_path(path.dentry->d_name.name);\n	}\n#endif' fs/stat.c
+            if ! grep -q "susfs_task_state" include/linux/sched.h; then
+              sed -i '/struct task_struct {/,/};/ s/};/\n#ifdef CONFIG_SUSFS\n	uint32_t susfs_task_state;\n#endif\n};/' include/linux/sched.h
             fi
           fi
-          echo "::notice::Root and SUSFS integration completed."
-
 
       - name: Patch Bank Bypass (Strong Edition)
         run: |
           cd $GITHUB_WORKSPACE/kernel
+          # Fake trạng thái bootloader và bảo mật
           find fs/proc/ -name "cmdline.c" -exec sed -i 's/orange/green/g' {} + || true
           find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.verifiedbootstate/androidboot.strong_state/g' {} + || true
+          # Đổi tên nhận diện KernelSU để tránh bị app phát hiện chuỗi văn bản
           find . -type f -name "*.c" -exec sed -i 's/KernelSU/strongSU/g' {} + || true
-          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -strong-${{ github.event.inputs.ROOT_CHOICE }}/g' Makefile
+          sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -strong-${{ github.event.inputs.ROOT_CHOICE }}/g" Makefile
 
-      - name: Build Kernel (Fix -O3 Error)
+      - name: Build Kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           cd $GITHUB_WORKSPACE/kernel
           export ARCH=arm64
           
-          # Phẫu thuật Makefile tránh lỗi LLVM Parsing -O3
+          # Fix Makefile & LTO
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          if [ -f scripts/mod/Makefile ]; then
-              sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
-              sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
-          fi
-
+          
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
           
-          # Ép Config (SUSFS & Root)
+          # Ghi cấu hình Kernel (.config)
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
           if [ "${{ github.event.inputs.ROOT_CHOICE }}" != "No_Root" ]; then
             scripts/config --file out/.config -e KSU -e KSU_NEXT
-            if [ "${{ github.event.inputs.USE_SUSFS }}" = "true" ]; then
-              scripts/config --file out/.config -e SUSFS -e SUSFS_ROOT_PATH_SPOOF -e SUSFS_HIDE_KSU_FILES
-            fi
+            [ "${{ github.event.inputs.USE_SUSFS }}" = "true" ] && scripts/config --file out/.config -e SUSFS -e SUSFS_ROOT_PATH_SPOOF -e SUSFS_HIDE_KSU_FILES
           fi
           
           yes "" | make O=out oldconfig
           make -j$(nproc --all) O=out CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- HOSTCFLAGS="-O2 -w" KCFLAGS="-O3 -w -fno-builtin"
 
-      - name: Package with AnyKernel3
+      - name: Package & Sign (AnyKernel3)
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           sed -i 's/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g' anykernel.sh
           
-          # UI thông báo động
-          sed -i "/### AnyKernel setup/a ui_print \"  -> strong Kernel Applied!\"; ui_print \"  -> Mode: ${{ github.event.inputs.ROOT_CHOICE }}\"; ${{ github.event.inputs.USE_SUSFS && 'ui_print \"  -> SUSFS: Active\";' || '' }}" anykernel.sh
+          # UI thông báo trong Recovery
+          sed -i "/### AnyKernel setup/a ui_print \" \"; ui_print \"  -> strong Kernel Applied!\"; ui_print \"  -> Root: ${{ github.event.inputs.ROOT_CHOICE }}\"; ui_print \"  -> SUSFS: ${{ github.event.inputs.USE_SUSFS && 'Active' || 'None' }}\";" anykernel.sh
           
           cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image .
-          ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ github.event.inputs.ROOT_CHOICE }}${{ github.event.inputs.USE_SUSFS && '-SUSFS' || '' }}.zip"
-          zip -r9 "../$ZIP_NAME" *
-          echo "ZIP_FINAL=$ZIP_NAME" >> $GITHUB_ENV
+          ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ github.event.inputs.ROOT_CHOICE }}.zip"
+          zip -r9 "../$ZIP_NAME" * -x .git README.md
+          
+          # Ký file ZIP
+          cd ..
+          curl -L https://github.com/Magisk-Modules-Alt-Repo/zipsigner/raw/master/bin/zipsigner.jar -o zipsigner.jar
+          java -jar zipsigner.jar "$ZIP_NAME" "${ZIP_NAME%.zip}-signed.zip"
+          echo "ZIP_FINAL=${ZIP_NAME%.zip}-signed.zip" >> $GITHUB_ENV
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: ${{ env.ZIP_FINAL }}
-          name: strong Kernel - ${{ github.event.inputs.CODENAME }}
+          name: strong Kernel [${{ github.event.inputs.CODENAME }}]
           tag_name: strong-${{ github.event.inputs.CODENAME }}-${{ github.run_id }}
           body: |
-            - **Device:** ${{ github.event.inputs.CODENAME }}
-            - **Root:** ${{ github.event.inputs.ROOT_CHOICE }}
-            - **SUSFS:** ${{ github.event.inputs.USE_SUSFS && 'Enabled' || 'Disabled' }}
+            ### 🛠 Thông tin bản build
+            - **Thiết bị:** `${{ github.event.inputs.CODENAME }}`
+            - **Loại Root:** `${{ github.event.inputs.ROOT_CHOICE }}`
+            - **SUSFS:** `${{ github.event.inputs.USE_SUSFS && 'Đã bật' || 'Tắt' }}`
+            - **Kernel Commit:** `${{ env.COMMIT_HASH }}`
+            - **Thời gian:** `${{ env.BUILD_TIME }}`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
