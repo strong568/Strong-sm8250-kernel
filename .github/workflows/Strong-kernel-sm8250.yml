@@ -71,6 +71,22 @@ jobs:
               curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1
               ;;
           esac
+          
+      - name: Patch Kernel & Brand Branding
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+          # 1. Ẩn trạng thái Unlocked
+          sed -i 's/boot_ver/strong_ver/g' fs/proc/cmdline.c || true
+          sed -i 's/androidboot.bootdevice/androidboot.strong_dev/g' fs/proc/cmdline.c || true
+          find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.verifiedbootstate/androidboot.strong_state/g' {} + || true
+          find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.flash.locked/androidboot.strong.locked/g' {} + || true
+          sed -i 's/orange/green/g' fs/proc/cmdline.c || true
+          
+          # 2. Đổi tên hiển thị Kernel (strong-edition)
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -strong-edition/g' Makefile
+          
+          echo "::notice::Patches and Branding applied!"
+                    
       - name: Build Kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
@@ -83,8 +99,8 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT SÂU (Xử lý các tham số LLVM không xác định)
-          # Xóa toàn bộ các cờ tối ưu hóa lạ mà Clang-13 không hiểu
+          # 1. PHẪU THUẬT SÂU (Đặc trị lỗi LLVM option parsing '-O3')
+          # Xóa toàn bộ các cờ LLVM lạ gây crash modpost
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-run-inliner//g' {} + || true
@@ -92,8 +108,10 @@ jobs:
           find . -type f -name "Makefile*" -exec sed -i 's/-run-dce//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-mllvm -polly//g' {} + || true
           
-          # Đặc trị scripts/mod/empty.o: Ép nó dùng cờ tối giản để không crash modpost
+          # ĐÒN QUYẾT ĐỊNH: Ép scripts/mod KHÔNG sử dụng cờ LTO của Kernel
+          # Lỗi '-O3' xuất phát từ việc scripts/mod kế thừa LTO_CFLAGS
           sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
+          sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
 
           # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
@@ -109,11 +127,11 @@ jobs:
              scripts/config --file out/.config -e KSU_NEXT
           fi
           
-          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG
+          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG (Bỏ qua các câu hỏi Memory Init)
           make O=out olddefconfig
 
           # 6. BIÊN DỊCH CHÍNH THỨC
-          # Sử dụng KCFLAGS="-w" để bỏ qua mọi cảnh báo cú pháp cờ
+          # Đặt HOSTCFLAGS rỗng hoặc cực kỳ đơn giản để tránh lỗi parsing LLVM trên Host
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -131,7 +149,6 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           
-          # Script nhận diện MIUI của strong568
           sed -i '/### AnyKernel setup/a \
           region="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region")" \
           if [ -z "$region" ]; then \
