@@ -72,21 +72,23 @@ jobs:
               ;;
           esac
           
-      - name: Patch Kernel & Brand Branding
+      - name: Patch Kernel (Bank Bypass Edition)
         run: |
           cd $GITHUB_WORKSPACE/kernel
           # 1. Ẩn trạng thái Unlocked
-          sed -i 's/boot_ver/strong_ver/g' fs/proc/cmdline.c || true
-          sed -i 's/androidboot.bootdevice/androidboot.strong_dev/g' fs/proc/cmdline.c || true
+          find fs/proc/ -name "cmdline.c" -exec sed -i 's/orange/green/g' {} + || true
           find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.verifiedbootstate/androidboot.strong_state/g' {} + || true
           find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.flash.locked/androidboot.strong.locked/g' {} + || true
-          sed -i 's/orange/green/g' fs/proc/cmdline.c || true
           
-          # 2. Đổi tên hiển thị Kernel (strong-edition)
+          # 2. Ẩn dấu vết Root/KSU
+          find . -type f -name "*.c" -exec sed -i 's/KernelSU/strongSU/g' {} + || true
+          find . -type f -name "*.c" -exec sed -i 's/ksud/strongd/g' {} + || true
+          sed -i 's/magisk/strong_hide/g' net/ipv4/tcp_ipv4.c || true
+          
+          # 3. Branding
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -strong-edition/g' Makefile
-          
-          echo "::notice::Patches and Branding applied!"
-                    
+          echo "::notice::Super Bank Patch Applied!"
+
       - name: Build Kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
@@ -99,39 +101,23 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT SÂU (Đặc trị lỗi LLVM option parsing '-O3')
-          # Xóa toàn bộ các cờ LLVM lạ gây crash modpost
+          # Đặc trị lỗi '-O3' tại scripts/mod (Phẫu thuật triệt để)
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-run-inliner//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-vectorizer=stripmine//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-run-dce//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-mllvm -polly//g' {} + || true
-          
-          # ĐÒN QUYẾT ĐỊNH: Ép scripts/mod KHÔNG sử dụng cờ LTO của Kernel
-          # Lỗi '-O3' xuất phát từ việc scripts/mod kế thừa LTO_CFLAGS
-          sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
-          sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
+          if [ -f scripts/mod/Makefile ]; then
+              sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile
+              sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile
+              sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
+          fi
 
-          # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
-
-          # 3. ÉP CONFIG (Tắt LTO để tránh lỗi linker tham số lạ)
-          scripts/config --file out/.config -d ARM64_LSE_ATOMICS
-          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
-          scripts/config --file out/.config -e INIT_STACK_NONE
+          scripts/config --file out/.config -d ARM64_LSE_ATOMICS -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
           
-          # 4. KÍCH HOẠT ROOT
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
-             scripts/config --file out/.config -e KSU
-             scripts/config --file out/.config -e KSU_NEXT
+             scripts/config --file out/.config -e KSU -e KSU_NEXT
           fi
           
-          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG (Bỏ qua các câu hỏi Memory Init)
           make O=out olddefconfig
-
-          # 6. BIÊN DỊCH CHÍNH THỨC
-          # Đặt HOSTCFLAGS rỗng hoặc cực kỳ đơn giản để tránh lỗi parsing LLVM trên Host
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -139,16 +125,15 @@ jobs:
                       AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
                       LD=ld.lld \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
-                      CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
                       HOSTCFLAGS="-O2 -w" \
                       KCFLAGS="-O3 -w -fno-builtin -mno-global-merge"
-
 
       - name: Package with AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           
+          # Cấu hình nhận diện vùng và ROM
           sed -i '/### AnyKernel setup/a \
           region="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region")" \
           if [ -z "$region" ]; then \
@@ -156,10 +141,12 @@ jobs:
           fi \
           case "$region" in \
             cn|in|ru|id|eu|tr|tw|gb|global|mx|jp|kr|lm|cl|mi) \
-                ui_print "  -> MIUI/HyperOS Detected!" \
+                ui_print "  -> MIUI/HyperOS Detected!"; \
+                ui_print "  -> Bank Bypass Patches Applied!"; \
               ;; \
             *) \
-                ui_print "  -> AOSP ROM Detected!" \
+                ui_print "  -> AOSP ROM Detected!"; \
+                ui_print "  -> Bank Bypass Patches Applied!"; \
               ;; \
           esac' anykernel.sh
 
@@ -191,6 +178,7 @@ jobs:
             - **Developer:** strong568
             - **Root:** ${{ matrix.root_option }}
             - **Commit:** ${{ env.COMMIT_HASH }}
+            - **Bypass:** Bank & Bootloader Hide Patches applied.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
