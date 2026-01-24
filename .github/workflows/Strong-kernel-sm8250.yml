@@ -83,24 +83,18 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT TRIỆT ĐỂ: Xóa sạch các cờ gây lỗi parsing LLVM
-          # Xóa tham số advisor và sửa lỗi nhận diện -O3 bằng cách làm sạch Makefile
+          # 1. "THIẾT QUÂN LUẬT" MAKEFILE
+          # Xóa sạch các tham số gây lỗi cho Proton Clang trong scripts và Makefile chính
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-implicit-function-declaration//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/=return-type//g' {} + || true
           
           # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
 
-          # 3. ÉP CONFIG (Vượt qua đoạn Memory Initialization & LSE Atomics)
-          # Tắt LSE Atomics vì binutils của Proton Clang quá cũ
+          # 3. ÉP CONFIG (Vượt qua các câu hỏi và tắt LTO)
           scripts/config --file out/.config -d ARM64_LSE_ATOMICS
-          # Tắt LTO để tránh lỗi LLVM Parsing -O3
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
-          # Ép chọn Stack Init None
           scripts/config --file out/.config -e INIT_STACK_NONE
-          scripts/config --file out/.config -d INIT_STACK_ALL_PATTERN
-          scripts/config --file out/.config -d INIT_STACK_ALL_ZERO
           
           # 4. KÍCH HOẠT ROOT
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
@@ -108,11 +102,11 @@ jobs:
              scripts/config --file out/.config -e KSU_NEXT
           fi
           
-          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG (Xử lý dứt điểm "Error in reading or end of file")
-          yes "" | make O=out oldconfig || make O=out olddefconfig
+          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG
+          make O=out olddefconfig
 
-          # 6. BIÊN DỊCH CHÍNH THỨC
-          # Sử dụng KCFLAGS="-w" để tắt mọi cảnh báo và ép Clang hiểu đúng tham số
+          # 6. BIÊN DỊCH VỚI HOSTCFLAGS LÀM SẠCH
+          # Chúng ta đặt HOSTCFLAGS="-O2" (thay vì O3) để tránh lỗi LLVM Parsing
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -121,8 +115,9 @@ jobs:
                       LD=ld.lld \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-                      KCFLAGS="-w -O3" \
-                      HOSTCFLAGS="-w"
+                      HOSTCFLAGS="-O2 -w" \
+                      HOSTLDFLAGS="" \
+                      KCFLAGS="-w -O3"
 
 
 
