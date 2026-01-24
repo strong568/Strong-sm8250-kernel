@@ -38,7 +38,6 @@ jobs:
           sudo ln -sf /usr/bin/python3 /usr/bin/python
           sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 || true
 
-      # --- CẤU HÌNH CCACHE ---
       - name: Setup CCache
         uses: actions/cache@v4
         with:
@@ -46,15 +45,12 @@ jobs:
           key: ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-${{ github.run_id }}
           restore-keys: |
             ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-
-            ccache-${{ github.event.inputs.CODENAME }}-
 
-      - name: Install Toolchain
+      - name: Install Proton Clang (Stable Mirror)
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang
-          cd $GITHUB_WORKSPACE/clang
-          curl -LO "https://raw.githubusercontent.com/ZyCromerZ/Clang/main/scripts/install.sh"
-          chmod +x install.sh
-          ./install.sh . clang-r416183b1
+          # Sử dụng Proton Clang bản mới nhất từ kdrag0n
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
 
       - name: Clone Kernel Source
         run: |
@@ -80,10 +76,9 @@ jobs:
       - name: Build Kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-          # Thiết lập biến môi trường cho CCache
           export USE_CCACHE=1
           export CCACHE_DIR=/home/runner/.ccache
-          ccache -M 5G # Giới hạn bộ nhớ cache là 5GB
+          ccache -M 5G
           
           cd $GITHUB_WORKSPACE/kernel
           export ARCH=arm64
@@ -97,15 +92,13 @@ jobs:
              echo "CONFIG_KSU_NEXT=y" >> out/.config
           fi
 
-          # Thêm CC="ccache clang" để kích hoạt cache
+          # Build với Proton Clang
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
                       CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                      AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-          
-          # Hiển thị thống kê CCache sau khi build
-          ccache -s
+                      AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+                      LD=ld.lld
 
       - name: Package with AnyKernel3
         run: |
@@ -153,9 +146,8 @@ jobs:
           body: |
             ## strong Kernel for ${{ github.event.inputs.CODENAME }}
             - **Developer:** strong568
-            - **Root:** ${{ matrix.root_option }}
+            - **Toolchain:** Proton Clang (kdrag0n)
             - **Commit:** ${{ env.COMMIT_HASH }}
-            - **Note:** CCache enabled for faster builds.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
