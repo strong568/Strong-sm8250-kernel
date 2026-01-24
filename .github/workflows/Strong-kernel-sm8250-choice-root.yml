@@ -48,38 +48,27 @@ jobs:
       - name: Integrate Root & SUSFS
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          
-          # 1. Cài đặt Root
           case "${{ github.event.inputs.ROOT_CHOICE }}" in
             "KSU_Next"|"RKSU")
-              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-              ;;
+              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next ;;
             "SukiSU_Ultra")
-              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
-              ;;
+              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main ;;
           esac
 
-          # 2. Xử lý SUSFS (Bypass Git Auth 128 bằng ZIP)
           if [ "${{ github.event.inputs.USE_SUSFS }}" = "true" ]; then
             cd $GITHUB_WORKSPACE
             mkdir -p susfs_source && cd susfs_source
             curl -L https://github.com/rifsxd/susfs4ksu/archive/refs/heads/next.zip -o susfs.zip
             unzip -q susfs.zip
             SUSFS_DIR="$GITHUB_WORKSPACE/susfs_source/susfs4ksu-next"
-            
             cd $GITHUB_WORKSPACE/kernel
             cp $SUSFS_DIR/kernel/include/linux/susfs.h include/linux/
             cp $SUSFS_DIR/kernel/fs/susfs.c fs/
-            
-            # Patch KernelSU Drivers
             if [ -d "drivers/kernelsu" ]; then
               cd drivers/kernelsu
               patch -p1 < $SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || echo "KSU patch failed"
               cd ../..
             fi
-            
-            # 3. Manual SED Patch (Cấu trúc Kernel 4.19 SM8250)
-            echo "[+] Applying manual system patches..."
             sed -i '/filename = getname(filename_user);/a #ifdef CONFIG_SUSFS\n	if (current->susfs_task_state & SUSFS_TASK_STATE_BIT_IS_SUS_ID) {\n		if (!IS_ERR(filename)) {\n			susfs_is_sus_path(filename->name);\n		}\n	}\n#endif' fs/open.c
             sed -i '/error = vfs_getattr(&path, stat, request_mask, query_flags);/i #ifdef CONFIG_SUSFS\n	if (current->susfs_task_state & SUSFS_TASK_STATE_BIT_IS_SUS_ID) {\n		susfs_is_sus_path(path.dentry->d_name.name);\n	}\n#endif' fs/stat.c
             if ! grep -q "susfs_task_state" include/linux/sched.h; then
@@ -90,10 +79,8 @@ jobs:
       - name: Patch Bank Bypass (Strong Edition)
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          # Fake trạng thái bootloader và bảo mật
           find fs/proc/ -name "cmdline.c" -exec sed -i 's/orange/green/g' {} + || true
           find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.verifiedbootstate/androidboot.strong_state/g' {} + || true
-          # Đổi tên nhận diện KernelSU để tránh bị app phát hiện chuỗi văn bản
           find . -type f -name "*.c" -exec sed -i 's/KernelSU/strongSU/g' {} + || true
           sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -strong-${{ github.event.inputs.ROOT_CHOICE }}/g" Makefile
 
@@ -102,19 +89,13 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           cd $GITHUB_WORKSPACE/kernel
           export ARCH=arm64
-          
-          # Fix Makefile & LTO
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
-          
-          # Ghi cấu hình Kernel (.config)
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
           if [ "${{ github.event.inputs.ROOT_CHOICE }}" != "No_Root" ]; then
             scripts/config --file out/.config -e KSU -e KSU_NEXT
             [ "${{ github.event.inputs.USE_SUSFS }}" = "true" ] && scripts/config --file out/.config -e SUSFS -e SUSFS_ROOT_PATH_SPOOF -e SUSFS_HIDE_KSU_FILES
           fi
-          
           yes "" | make O=out oldconfig
           make -j$(nproc --all) O=out CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- HOSTCFLAGS="-O2 -w" KCFLAGS="-O3 -w -fno-builtin"
 
@@ -122,16 +103,24 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
+          
+          # Cấu hình AnyKernel3 cơ bản
           sed -i 's/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g' anykernel.sh
           
-          # UI thông báo trong Recovery
+          # Hiệu chỉnh sâu cho vendor_boot và cmdline spoofing
+          sed -i '/## AnyKernel install/a \
+          dump_boot;\
+          patch_cmdline "androidboot.verifiedbootstate" "androidboot.verifiedbootstate=green";\
+          patch_cmdline "androidboot.flash.locked" "androidboot.flash.locked=1";\
+          write_boot;' anykernel.sh
+          
+          # UI thông báo
           sed -i "/### AnyKernel setup/a ui_print \" \"; ui_print \"  -> strong Kernel Applied!\"; ui_print \"  -> Root: ${{ github.event.inputs.ROOT_CHOICE }}\"; ui_print \"  -> SUSFS: ${{ github.event.inputs.USE_SUSFS && 'Active' || 'None' }}\";" anykernel.sh
           
           cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image .
           ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ github.event.inputs.ROOT_CHOICE }}.zip"
           zip -r9 "../$ZIP_NAME" * -x .git README.md
           
-          # Ký file ZIP
           cd ..
           curl -L https://github.com/Magisk-Modules-Alt-Repo/zipsigner/raw/master/bin/zipsigner.jar -o zipsigner.jar
           java -jar zipsigner.jar "$ZIP_NAME" "${ZIP_NAME%.zip}-signed.zip"
@@ -148,7 +137,7 @@ jobs:
             - **Thiết bị:** `${{ github.event.inputs.CODENAME }}`
             - **Loại Root:** `${{ github.event.inputs.ROOT_CHOICE }}`
             - **SUSFS:** `${{ github.event.inputs.USE_SUSFS && 'Đã bật' || 'Tắt' }}`
-            - **Kernel Commit:** `${{ env.COMMIT_HASH }}`
+            - **Tính năng:** Tự động Patch cmdline (green state) qua AnyKernel3.
             - **Thời gian:** `${{ env.BUILD_TIME }}`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

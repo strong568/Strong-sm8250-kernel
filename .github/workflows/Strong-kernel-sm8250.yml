@@ -126,6 +126,14 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           sed -i 's/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g' anykernel.sh
+          # Hiệu chỉnh sâu cho vendor_boot và cmdline spoofing
+          sed -i '/## AnyKernel install/a \
+          dump_boot;\
+          patch_cmdline "androidboot.verifiedbootstate" "androidboot.verifiedbootstate=green";\
+          patch_cmdline "androidboot.flash.locked" "androidboot.flash.locked=1";\
+          write_boot;' anykernel.sh
+          
+          # UI thông báo
           sed -i '/### AnyKernel setup/a ui_print "  -> strong Kernel Applied!"; ui_print "  -> Bank Bypass Patches Active!";' anykernel.sh
           
           cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image .
