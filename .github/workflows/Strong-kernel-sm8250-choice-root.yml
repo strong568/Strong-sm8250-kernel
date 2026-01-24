@@ -51,7 +51,8 @@ jobs:
           # 1. Xử lý lựa chọn Root
           case "${{ github.event.inputs.ROOT_CHOICE }}" in
             "KSU_Next")
-              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || exit 1
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s dev || \
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev_susfs/kernel/setup.sh" | bash -s dev_susfs || exit 1
               ;;
             "SukiSU_Ultra")
               curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
