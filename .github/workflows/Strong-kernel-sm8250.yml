@@ -20,8 +20,8 @@ on:
 
 jobs:
   build:
+    # Hạ cấp xuống 22.04 để tương thích Proton Clang và tránh lỗi RELR/Libc
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +30,7 @@ jobs:
     name: Build strong (${{ matrix.root_option }})
     
     steps:
-      - name: Checkout Workflow
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Environment
@@ -50,11 +50,11 @@ jobs:
 
       - name: Install Proton Clang
         run: |
-          git clone --depth=1 --single-branch https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
 
       - name: Clone Kernel Source
         run: |
-          git clone --depth=1 --single-branch ${{ github.event.inputs.KERNEL_TREE }} -b ${{ github.event.inputs.KERNEL_TREE_BRANCH }} $GITHUB_WORKSPACE/kernel
+          git clone --depth=1 ${{ github.event.inputs.KERNEL_TREE }} -b ${{ github.event.inputs.KERNEL_TREE_BRANCH }} $GITHUB_WORKSPACE/kernel
           cd $GITHUB_WORKSPACE/kernel
           echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
@@ -63,13 +63,13 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel
           case "${{ matrix.root_option }}" in
             "KSU_Next")
-              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || exit 1
+              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main
               ;;
             "SukiSU_Ultra")
-              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
+              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
               ;;
             "RKSU")
-              curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1
+              curl -LSs "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash
               ;;
           esac
 
@@ -84,38 +84,41 @@ jobs:
           export ARCH=arm64
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
-
-          # FIX LỖI Clang: Loại bỏ tham số regalloc gây crash trên Proton Clang
+          
+          # Dọn dẹp các tham số gây lỗi biên dịch cho Proton Clang
           sed -i 's/-regalloc-enable-advisor=release//g' Makefile || true
           find scripts/ -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-
-          # 1. Cấu hình defconfig
+          
+          # Khởi tạo config
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
           
-          # 2. Tự động điền config còn thiếu (Fix lỗi Error in reading or end of file)
-          make O=out olddefconfig
-
-          # 3. Kích hoạt Config Root
+          # Tắt LTO để tránh lỗi linker tham số lạ
+          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
+          
+          # Bật KSU config
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
              scripts/config --file out/.config -e KSU
              scripts/config --file out/.config -e KSU_NEXT
           fi
+          
+          # Tự động trả lời Enter cho các config mới (Memory init, etc.)
+          yes "" | make O=out oldconfig
 
-          # 4. Biên dịch
+          # Build với bộ cờ chuẩn
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
                       CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                       AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
                       LD=ld.lld \
-                      CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+                      CLANG_TRIPLE=aarch64-linux-gnu-
 
       - name: Package with AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           
-          # Nhận diện MIUI của strong568
+          # Script nhận diện MIUI của strong568
           sed -i '/### AnyKernel setup/a \
           region="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region")" \
           if [ -z "$region" ]; then \
@@ -123,10 +126,10 @@ jobs:
           fi \
           case "$region" in \
             cn|in|ru|id|eu|tr|tw|gb|global|mx|jp|kr|lm|cl|mi) \
-                ui_print "  -> MIUI/HyperOS Detected!" \
+                ui_print "  -> MIUI/HyperOS ROM is detected!" \
               ;; \
             *) \
-                ui_print "  -> AOSP ROM Detected!" \
+                ui_print "  -> AOSP ROM is detected!" \
               ;; \
           esac' anykernel.sh
 
@@ -156,8 +159,9 @@ jobs:
           body: |
             ## strong Kernel for ${{ github.event.inputs.CODENAME }}
             - **Developer:** strong568
-            - **Root:** ${{ matrix.root_option }}
+            - **Toolchain:** Proton Clang
             - **Commit:** ${{ env.COMMIT_HASH }}
+            - **Note:** Universal AOSP/MIUI (Auto-detect)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
