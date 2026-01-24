@@ -39,14 +39,6 @@ jobs:
           sudo ln -sf /usr/bin/python3 /usr/bin/python
           sudo apt install -y libncurses5
 
-      - name: Setup CCache
-        uses: actions/cache@v4
-        with:
-          path: /home/runner/.ccache
-          key: ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-${{ github.run_id }}
-          restore-keys: |
-            ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-
-
       - name: Install Proton Clang
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
@@ -61,33 +53,25 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/kernel
           case "${{ matrix.root_option }}" in
-            "KSU_Next")
-              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || exit 1
-              ;;
-            "SukiSU_Ultra")
-              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
-              ;;
-            "RKSU")
-              curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1
-              ;;
+            "KSU_Next") curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || exit 1 ;;
+            "SukiSU_Ultra") curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1 ;;
+            "RKSU") curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1 ;;
           esac
           
-      - name: Patch Kernel (Bank Bypass Edition)
+      - name: Patch Kernel (Super Bank Bypass)
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          # 1. Ẩn trạng thái Unlocked
+          # Ẩn trạng thái Unlocked & Orange trong cmdline
           find fs/proc/ -name "cmdline.c" -exec sed -i 's/orange/green/g' {} + || true
           find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.verifiedbootstate/androidboot.strong_state/g' {} + || true
           find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.flash.locked/androidboot.strong.locked/g' {} + || true
           
-          # 2. Ẩn dấu vết Root/KSU
+          # Đổi tên nhận diện KernelSU/ksud để qua mặt các app quét string
           find . -type f -name "*.c" -exec sed -i 's/KernelSU/strongSU/g' {} + || true
           find . -type f -name "*.c" -exec sed -i 's/ksud/strongd/g' {} + || true
-          sed -i 's/magisk/strong_hide/g' net/ipv4/tcp_ipv4.c || true
           
-          # 3. Branding
+          # Branding tên Kernel
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -strong-edition/g' Makefile
-          echo "::notice::Super Bank Patch Applied!"
 
       - name: Build Kernel
         run: |
@@ -101,23 +85,36 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # Đặc trị lỗi '-O3' tại scripts/mod (Phẫu thuật triệt để)
-          find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-mllvm -polly//g' {} + || true
+          # PHẪU THUẬT TRIỆT ĐỂ: Xóa sạch các cờ LLVM gây crash mod/empty.o
+          # Quét tất cả các file có khả năng chứa cờ mllvm
+          find . -type f -name "*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
+          find . -type f -name "*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
+          find . -type f -name "*" -exec sed -i 's/-run-inliner//g' {} + || true
+          find . -type f -name "*" -exec sed -i 's/-vectorizer=stripmine//g' {} + || true
+          find . -type f -name "*" -exec sed -i 's/-run-dce//g' {} + || true
+          find . -type f -name "*" -exec sed -i 's/-mllvm -polly//g' {} + || true
+          
+          # Đặc trị scripts/mod/Makefile
           if [ -f scripts/mod/Makefile ]; then
               sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile
               sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile
               sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
           fi
 
+          # Khởi tạo config
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
+
+          # Ép cấu hình Memory Initialization và tắt LTO
           scripts/config --file out/.config -d ARM64_LSE_ATOMICS -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
           
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
              scripts/config --file out/.config -e KSU -e KSU_NEXT
           fi
           
-          make O=out olddefconfig
+          # Lệnh yes "" cực kỳ quan trọng để vượt qua interactive prompt nếu scripts/config thất bại
+          yes "" | make O=out oldconfig || make O=out olddefconfig
+
+          # Biên dịch chính thức
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -128,62 +125,31 @@ jobs:
                       HOSTCFLAGS="-O2 -w" \
                       KCFLAGS="-O3 -w -fno-builtin -mno-global-merge"
 
-      - name: Package with AnyKernel3
+      - name: Package & Release
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
-          
-          # Cấu hình nhận diện vùng và ROM
-          sed -i '/### AnyKernel setup/a \
-          region="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region")" \
-          if [ -z "$region" ]; then \
-            region="$(file_getprop /product/etc/build.prop "ro.miui.build.region")" \
-          fi \
-          case "$region" in \
-            cn|in|ru|id|eu|tr|tw|gb|global|mx|jp|kr|lm|cl|mi) \
-                ui_print "  -> MIUI/HyperOS Detected!"; \
-                ui_print "  -> Bank Bypass Patches Applied!"; \
-              ;; \
-            *) \
-                ui_print "  -> AOSP ROM Detected!"; \
-                ui_print "  -> Bank Bypass Patches Applied!"; \
-              ;; \
-          esac' anykernel.sh
-
           sed -i 's/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g' anykernel.sh
-          sed -i 's/device.name2=toro/device.name2=munchin/g' anykernel.sh
+          # Thêm UI thông báo Bank Bypass
+          sed -i '/### AnyKernel setup/a ui_print "  -> strong Kernel Applied!"; ui_print "  -> Bank Bypass Patches Active!";' anykernel.sh
           
           cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image .
           [ -f $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dtbo.img ] && cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dtbo.img .
-          [ -f $GITHUB_WORKSPACE/kernel/out/vendor_boot.img ] && cp $GITHUB_WORKSPACE/kernel/out/vendor_boot.img .
-
+          
           ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}.zip"
           zip -r9 "../$ZIP_NAME" * -x .git README.md
           
           cd ..
-          md5sum "$ZIP_NAME" > "$ZIP_NAME.md5"
           echo "ZIP_FINAL=$ZIP_NAME" >> $GITHUB_ENV
-          echo "MD5_FINAL=$ZIP_NAME.md5" >> $GITHUB_ENV
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            ${{ env.ZIP_FINAL }}
-            ${{ env.MD5_FINAL }}
+          files: ${{ env.ZIP_FINAL }}
           name: strong Kernel - ${{ github.event.inputs.CODENAME }}
           tag_name: strong-${{ github.event.inputs.CODENAME }}-${{ github.run_id }}
           body: |
-            ## strong Kernel for ${{ github.event.inputs.CODENAME }}
-            - **Developer:** strong568
             - **Root:** ${{ matrix.root_option }}
-            - **Commit:** ${{ env.COMMIT_HASH }}
-            - **Bypass:** Bank & Bootloader Hide Patches applied.
+            - **Bypass:** Bank/Bootloader Hide Patches applied.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Cleanup
-        if: always()
-        run: |
-          rm -rf $GITHUB_WORKSPACE/kernel/out
-          rm -rf $GITHUB_WORKSPACE/AnyKernel3
