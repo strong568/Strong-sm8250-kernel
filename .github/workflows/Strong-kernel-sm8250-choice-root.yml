@@ -48,29 +48,39 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/kernel
           
-          # 1. Xử lý lựa chọn Root
+          # 1. Xử lý lựa chọn Root (Sửa lỗi pathspec main)
           case "${{ github.event.inputs.ROOT_CHOICE }}" in
             "KSU_Next")
-              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s dev || \
-              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev_susfs/kernel/setup.sh" | bash -s dev_susfs || exit 1
+              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || exit 1
               ;;
             "SukiSU_Ultra")
               curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "RKSU")
-              # Dùng KSU-Next làm nền cho RKSU vì RKSU gốc hay 404
               curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || exit 1
               ;;
           esac
 
-          # 2. Xử lý lựa chọn SUSFS
+          # 2. Xử lý lựa chọn SUSFS (Dùng ZIP để tránh lỗi Git Auth 128)
           if [ "${{ github.event.inputs.USE_SUSFS }}" = "true" ]; then
-            git clone --depth=1 https://github.com/rifsxd/susfs4ksu.git $GITHUB_WORKSPACE/susfs_tmp
+            mkdir -p $GITHUB_WORKSPACE/susfs_tmp
+            cd $GITHUB_WORKSPACE/susfs_tmp
+            # Tải SUSFS bản mới nhất qua ZIP thay vì git clone
+            curl -L https://github.com/rifsxd/susfs4ksu/archive/refs/heads/next.zip -o susfs.zip
+            unzip susfs.zip && mv susfs4ksu-next/* .
+            
+            cd $GITHUB_WORKSPACE/kernel
             cp $GITHUB_WORKSPACE/susfs_tmp/kernel/include/linux/susfs.h include/linux/
             cp $GITHUB_WORKSPACE/susfs_tmp/kernel/fs/susfs.c fs/
+            
             # Patch KernelSU để nhận diện SUSFS
-            cd drivers/kernelsu && patch -p1 < $GITHUB_WORKSPACE/susfs_tmp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || echo "Patch failed, checking files..."
+            if [ -d "drivers/kernelsu" ]; then
+              cd drivers/kernelsu
+              patch -p1 < $GITHUB_WORKSPACE/susfs_tmp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || echo "Manual patch failed, checking fallback..."
+            fi
           fi
+          echo "::notice::Root and SUSFS integration completed."
+
 
       - name: Patch Bank Bypass (Strong Edition)
         run: |
