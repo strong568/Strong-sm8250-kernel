@@ -57,16 +57,14 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel
           echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: Integrate Root Solution (Fixed URLs)
+      - name: Integrate Root Solution
         run: |
           cd $GITHUB_WORKSPACE/kernel
           case "${{ matrix.root_option }}" in
             "KSU_Next")
-              # Cập nhật đường dẫn KernelSU-Next chính xác
               curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "SukiSU_Ultra")
-              # Cập nhật đường dẫn SukiSU-Ultra chính xác
               curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "RKSU")
@@ -85,36 +83,51 @@ jobs:
           export ARCH=arm64
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
-          
-          # Dọn dẹp cờ gây lỗi cho Proton Clang
+
+          # 1. PHẪU THUẬT: Xóa tham số advisor gây crash trên Proton Clang
           sed -i 's/-regalloc-enable-advisor=release//g' Makefile || true
           find scripts/ -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
           
+          # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
+
+          # 3. ÉP CẤU HÌNH: Tránh dừng lại hỏi (Fix "Error in reading or end of file")
+          echo "CONFIG_INIT_STACK_NONE=y" >> out/.config
+          echo "CONFIG_INIT_ON_ALLOC_DEFAULT_ON=n" >> out/.config
+          echo "CONFIG_INIT_ON_FREE_DEFAULT_ON=n" >> out/.config
+          
+          # Tắt LTO để tránh xung đột LLVM tham số -O3
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
           
+          # 4. KÍCH HOẠT ROOT
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
              scripts/config --file out/.config -e KSU
              scripts/config --file out/.config -e KSU_NEXT
           fi
           
-          # Tự động trả lời câu hỏi cấu hình mới
-          yes "" | make O=out oldconfig
+          # 5. CẬP NHẬT CONFIG
+          make O=out olddefconfig
 
+          # 6. BIÊN DỊCH
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
                       CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                      AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+                      AR=llvm-ar \
+                      NM=llvm-nm \
+                      OBJCOPY=llvm-objcopy \
+                      OBJDUMP=llvm-objdump \
+                      STRIP=llvm-strip \
                       LD=ld.lld \
-                      CLANG_TRIPLE=aarch64-linux-gnu-
+                      KCFLAGS="-O3 -Wno-error" \
+                      HOSTCFLAGS="-O3"
 
       - name: Package with AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           
-          # Script nhận diện MIUI của strong568
+          # Nhận diện MIUI/AOSP
           sed -i '/### AnyKernel setup/a \
           region="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region")" \
           if [ -z "$region" ]; then \
@@ -122,10 +135,10 @@ jobs:
           fi \
           case "$region" in \
             cn|in|ru|id|eu|tr|tw|gb|global|mx|jp|kr|lm|cl|mi) \
-                ui_print "  -> MIUI/HyperOS ROM is detected!" \
+                ui_print "  -> MIUI/HyperOS Detected!" \
               ;; \
             *) \
-                ui_print "  -> AOSP ROM is detected!" \
+                ui_print "  -> AOSP ROM Detected!" \
               ;; \
           esac' anykernel.sh
 
