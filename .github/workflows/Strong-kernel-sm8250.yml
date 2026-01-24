@@ -20,7 +20,8 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Chuyển về Ubuntu 22.04 để fix lỗi libc .relr.dyn unknown type
+    runs-on: ubuntu-22.04
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -38,7 +39,8 @@ jobs:
           sudo apt update
           sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl ccache
           sudo ln -sf /usr/bin/python3 /usr/bin/python
-          sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 || true
+          # Cài đặt libncurses5 thật sự có sẵn trên 22.04
+          sudo apt install -y libncurses5
 
       - name: Setup CCache
         uses: actions/cache@v4
@@ -61,13 +63,11 @@ jobs:
       - name: Integrate Root Solution
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          # Sử dụng cờ -f để curl trả về lỗi nếu gặp 404, tránh bash chạy file lỗi
           case "${{ matrix.root_option }}" in
             "KSU_Next")
               curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "SukiSU_Ultra")
-              # Kiểm tra lại URL SukiSU, nếu lỗi 404 hãy thử branch chính xác
               curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "RKSU")
@@ -77,6 +77,7 @@ jobs:
 
       - name: Build Kernel
         run: |
+          # Thêm đường dẫn bin của Proton Clang vào PATH
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           export USE_CCACHE=1
           export CCACHE_DIR=/home/runner/.ccache
@@ -87,21 +88,20 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
           
-          # 1. Cấu hình defconfig
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
           
-          # 2. Bật Config Root vào file .config
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
              scripts/config --file out/.config -e KSU
              scripts/config --file out/.config -e KSU_NEXT
           fi
 
-          # 3. Biên dịch
+          # Dùng thêm các cờ để ép dùng đúng Clang/LLVM Linker
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
                       CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                       AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+                      OBJSIZE=llvm-size \
                       LD=ld.lld
 
       - name: Package with AnyKernel3
@@ -150,8 +150,8 @@ jobs:
           body: |
             ## strong Kernel for ${{ github.event.inputs.CODENAME }}
             - **Developer:** strong568
-            - **Root Option:** ${{ matrix.root_option }}
-            - **Commit Hash:** ${{ env.COMMIT_HASH }}
+            - **Environment:** Ubuntu 22.04 (Stable)
+            - **Root:** ${{ matrix.root_option }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
