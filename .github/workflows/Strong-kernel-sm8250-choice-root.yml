@@ -1,0 +1,134 @@
+name: Build Kernel strong-sm8250 choice root susfs
+
+on:
+  workflow_dispatch:
+    inputs:
+      CODENAME:
+        description: 'Mã máy (munch, alioth, umi, lmi)'
+        type: choice
+        default: 'munch'
+        options: [munch, alioth, umi, lmi]
+      ROOT_CHOICE:
+        description: 'Chọn loại Root'
+        type: choice
+        default: 'KSU_Next'
+        options: [KSU_Next, SukiSU_Ultra, RKSU, No_Root]
+      USE_SUSFS:
+        description: 'Tích hợp SUSFS (Ẩn Root siêu cấp)'
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    name: Build strong (${{ github.event.inputs.ROOT_CHOICE }}${{ github.event.inputs.USE_SUSFS && ' + SUSFS' || '' }})
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl ccache
+          sudo ln -sf /usr/bin/python3 /usr/bin/python
+          sudo apt install -y libncurses5
+
+      - name: Install Proton Clang
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=1 ${{ github.event.inputs.KERNEL_TREE || 'https://github.com/EmanuelCN/kernel_xiaomi_sm8250' }} -b staging $GITHUB_WORKSPACE/kernel
+          cd $GITHUB_WORKSPACE/kernel
+          echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Integrate Root & SUSFS
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+          
+          # 1. Xử lý lựa chọn Root
+          case "${{ github.event.inputs.ROOT_CHOICE }}" in
+            "KSU_Next")
+              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || exit 1
+              ;;
+            "SukiSU_Ultra")
+              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
+              ;;
+            "RKSU")
+              # Dùng KSU-Next làm nền cho RKSU vì RKSU gốc hay 404
+              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || exit 1
+              ;;
+          esac
+
+          # 2. Xử lý lựa chọn SUSFS
+          if [ "${{ github.event.inputs.USE_SUSFS }}" = "true" ]; then
+            git clone --depth=1 https://github.com/rifsxd/susfs4ksu.git $GITHUB_WORKSPACE/susfs_tmp
+            cp $GITHUB_WORKSPACE/susfs_tmp/kernel/include/linux/susfs.h include/linux/
+            cp $GITHUB_WORKSPACE/susfs_tmp/kernel/fs/susfs.c fs/
+            # Patch KernelSU để nhận diện SUSFS
+            cd drivers/kernelsu && patch -p1 < $GITHUB_WORKSPACE/susfs_tmp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || echo "Patch failed, checking files..."
+          fi
+
+      - name: Patch Bank Bypass (Strong Edition)
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+          find fs/proc/ -name "cmdline.c" -exec sed -i 's/orange/green/g' {} + || true
+          find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.verifiedbootstate/androidboot.strong_state/g' {} + || true
+          find . -type f -name "*.c" -exec sed -i 's/KernelSU/strongSU/g' {} + || true
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -strong-${{ github.event.inputs.ROOT_CHOICE }}/g' Makefile
+
+      - name: Build Kernel (Fix -O3 Error)
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          cd $GITHUB_WORKSPACE/kernel
+          export ARCH=arm64
+          
+          # Phẫu thuật Makefile tránh lỗi LLVM Parsing -O3
+          find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
+          if [ -f scripts/mod/Makefile ]; then
+              sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
+              sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
+          fi
+
+          make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
+          
+          # Ép Config (SUSFS & Root)
+          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
+          if [ "${{ github.event.inputs.ROOT_CHOICE }}" != "No_Root" ]; then
+            scripts/config --file out/.config -e KSU -e KSU_NEXT
+            if [ "${{ github.event.inputs.USE_SUSFS }}" = "true" ]; then
+              scripts/config --file out/.config -e SUSFS -e SUSFS_ROOT_PATH_SPOOF -e SUSFS_HIDE_KSU_FILES
+            fi
+          fi
+          
+          yes "" | make O=out oldconfig
+          make -j$(nproc --all) O=out CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- HOSTCFLAGS="-O2 -w" KCFLAGS="-O3 -w -fno-builtin"
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
+          cd $GITHUB_WORKSPACE/AnyKernel3
+          sed -i 's/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g' anykernel.sh
+          
+          # UI thông báo động
+          sed -i "/### AnyKernel setup/a ui_print \"  -> strong Kernel Applied!\"; ui_print \"  -> Mode: ${{ github.event.inputs.ROOT_CHOICE }}\"; ${{ github.event.inputs.USE_SUSFS && 'ui_print \"  -> SUSFS: Active\";' || '' }}" anykernel.sh
+          
+          cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image .
+          ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ github.event.inputs.ROOT_CHOICE }}${{ github.event.inputs.USE_SUSFS && '-SUSFS' || '' }}.zip"
+          zip -r9 "../$ZIP_NAME" *
+          echo "ZIP_FINAL=$ZIP_NAME" >> $GITHUB_ENV
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.ZIP_FINAL }}
+          name: strong Kernel - ${{ github.event.inputs.CODENAME }}
+          tag_name: strong-${{ github.event.inputs.CODENAME }}-${{ github.run_id }}
+          body: |
+            - **Device:** ${{ github.event.inputs.CODENAME }}
+            - **Root:** ${{ github.event.inputs.ROOT_CHOICE }}
+            - **SUSFS:** ${{ github.event.inputs.USE_SUSFS && 'Enabled' || 'Disabled' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
