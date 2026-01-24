@@ -1,0 +1,140 @@
+name: Build Kernel strong-sm8250
+
+on:
+  workflow_dispatch:
+    inputs:
+      CODENAME:
+        description: 'Select Phone Codename'
+        type: choice
+        default: 'munch'
+        options: [munch, alioth, umi, lmi]
+        required: true
+      KERNEL_TREE:
+        description: 'Kernel Tree URL'
+        default: 'https://github.com/EmanuelCN/kernel_xiaomi_sm8250'
+        required: true
+      KERNEL_TREE_BRANCH:
+        description: 'Kernel Tree Branch'
+        default: 'staging'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rom_target: [AOSP, MIUI_HyperOS]
+        root_option: [KSU_Next, SukiSU_Ultra, RKSU, No_Root]
+
+    name: Build strong (${{ matrix.rom_target }} - ${{ matrix.root_option }})
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Environment (Fixed)
+        run: |
+          sudo apt update
+          # Loại bỏ python2 và lib32ncurses5-dev bị lỗi
+          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl
+          
+          # Tạo liên kết để script dùng 'python' thay cho 'python3'
+          sudo ln -sf /usr/bin/python3 /usr/bin/python
+
+      - name: Install AOSP Clang
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/clang
+          cd $GITHUB_WORKSPACE/clang
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r416183b1.tar.gz
+          tar -xf clang-r416183b1.tar.gz
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=1 ${{ github.event.inputs.KERNEL_TREE }} -b ${{ github.event.inputs.KERNEL_TREE_BRANCH }} $GITHUB_WORKSPACE/kernel
+
+      - name: Integrate Root Solution
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+          case "${{ matrix.root_option }}" in
+            "KSU_Next")
+              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+              ;;
+            "SukiSU_Ultra")
+              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+              ;;
+            "RKSU")
+              curl -LSs "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash
+              ;;
+          esac
+
+      - name: Build Kernel
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          cd $GITHUB_WORKSPACE/kernel
+          export ARCH=arm64
+          export KBUILD_BUILD_USER="strong568"
+          export KBUILD_BUILD_HOST="strong-machine"
+          
+          make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
+          
+          if [ "${{ matrix.root_option }}" != "No_Root" ]; then
+             echo "CONFIG_KSU=y" >> out/.config
+             echo "CONFIG_KSU_NEXT=y" >> out/.config
+          fi
+
+          make -j$(nproc --all) O=out \
+                      CC=clang \
+                      CROSS_COMPILE=aarch64-linux-gnu- \
+                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+                      AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
+          cd $GITHUB_WORKSPACE/AnyKernel3
+          
+          # Script nhận diện MIUI của strong568
+          sed -i '/### AnyKernel setup/a \
+          region="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region")" \
+          if [ -z "$region" ]; then \
+            region="$(file_getprop /product/etc/build.prop "ro.miui.build.region")" \
+          fi \
+          case "$region" in \
+            cn|in|ru|id|eu|tr|tw|gb|global|mx|jp|kr|lm|cl|mi) \
+                ui_print "  -> MIUI/HyperOS Detected!" \
+              ;; \
+            *) \
+                ui_print "  -> AOSP ROM Detected!" \
+              ;; \
+          esac' anykernel.sh
+
+          sed -i 's/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g' anykernel.sh
+          sed -i 's/device.name2=toro/device.name2=munchin/g' anykernel.sh
+          
+          cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image .
+          [ -f $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dtbo.img ] && cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dtbo.img .
+          [ -f $GITHUB_WORKSPACE/kernel/out/vendor_boot.img ] && cp $GITHUB_WORKSPACE/kernel/out/vendor_boot.img .
+
+          ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ matrix.rom_target }}-${{ matrix.root_option }}.zip"
+          zip -r9 "../$ZIP_NAME" * -x .git README.md
+          
+          cd ..
+          md5sum "$ZIP_NAME" > "$ZIP_NAME.md5"
+          echo "ZIP_FINAL=$ZIP_NAME" >> $GITHUB_ENV
+          echo "MD5_FINAL=$ZIP_NAME.md5" >> $GITHUB_ENV
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ env.ZIP_FINAL }}
+            ${{ env.MD5_FINAL }}
+          name: strong Kernel - ${{ github.event.inputs.CODENAME }}
+          tag_name: strong-${{ github.event.inputs.CODENAME }}-${{ github.run_id }}
+          body: |
+            ## strong Kernel for ${{ github.event.inputs.CODENAME }}
+            - **Developer:** strong568
+            - **Build Host:** strong-machine
+            - **Python Version:** 3.x (linked as python)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
