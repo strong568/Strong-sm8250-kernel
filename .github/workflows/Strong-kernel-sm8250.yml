@@ -83,19 +83,22 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT CHUYÊN SÂU (Dọn dẹp scripts/mod)
-          # Xóa các tham số gây crash LLVM Parsing trong toàn bộ source
+          # 1. PHẪU THUẬT SÂU (Xử lý các tham số LLVM không xác định)
+          # Xóa toàn bộ các cờ tối ưu hóa lạ mà Clang-13 không hiểu
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-implicit-function-declaration//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-run-inliner//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-vectorizer=stripmine//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-run-dce//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-mllvm -polly//g' {} + || true
           
-          # Đặc trị lỗi "-O3" tại scripts/mod: Ép scripts/mod sử dụng cờ mặc định của host
+          # Đặc trị scripts/mod/empty.o: Ép nó dùng cờ tối giản để không crash modpost
           sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
 
           # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
 
-          # 3. ÉP CONFIG (Vượt qua các câu hỏi và tắt các tính năng gây xung đột)
+          # 3. ÉP CONFIG (Tắt LTO để tránh lỗi linker tham số lạ)
           scripts/config --file out/.config -d ARM64_LSE_ATOMICS
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
           scripts/config --file out/.config -e INIT_STACK_NONE
@@ -109,7 +112,8 @@ jobs:
           # 5. CẬP NHẬT CONFIG TỰ ĐỘNG
           make O=out olddefconfig
 
-          # 6. BIÊN DỊCH VỚI CỜ LÀM SẠCH (Ép bỏ qua warning và lỗi parsing)
+          # 6. BIÊN DỊCH CHÍNH THỨC
+          # Sử dụng KCFLAGS="-w" để bỏ qua mọi cảnh báo cú pháp cờ
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -119,8 +123,7 @@ jobs:
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
                       HOSTCFLAGS="-O2 -w" \
-                      HOSTCXXFLAGS="-O2 -w" \
-                      KCFLAGS="-O3 -w -mno-global-merge -fno-builtin"
+                      KCFLAGS="-O3 -w -fno-builtin -mno-global-merge"
 
 
       - name: Package with AnyKernel3
