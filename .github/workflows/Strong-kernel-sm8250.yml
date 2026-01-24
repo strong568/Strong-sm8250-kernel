@@ -49,21 +49,21 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel
           echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: Integrate Root Solution (Fixed URLs)
+      - name: Integrate Root Solution (Fixed URLs & Fallback)
         run: |
           cd $GITHUB_WORKSPACE/kernel
           case "${{ matrix.root_option }}" in
             "KSU_Next")
-              # Thử cả 2 branch main/master để tránh 404
-              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || \
-              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/master/kernel/setup.sh" | bash -s master || exit 1
+              # Thử nhánh main, nếu 404 thì thử nhánh master
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s main || \
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev_susfs/kernel/setup.sh" | bash -s master || exit 1
               ;;
             "SukiSU_Ultra")
               curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || \
               curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/master/kernel/setup.sh" | bash -s master || exit 1
               ;;
             "RKSU")
-              curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1
+              curl -LSsf "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash || exit 1
               ;;
           esac
           
@@ -94,26 +94,28 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT TRIỆT ĐỂ: Xóa các cờ LLVM lạ gây crash Proton Clang
-          # Quét và xóa các cờ mllvm không tương thích trong toàn bộ cây thư mục scripts
+          # 1. PHẪU THUẬT TRIỆT ĐỂ (Sửa trực tiếp scripts/mod/Makefile)
+          # Xóa toàn bộ các tham số LLVM lạ gây crash modpost/empty.o
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-run-inliner//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-vectorizer=stripmine//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-run-dce//g' {} + || true
           
-          # ĐÒN QUYẾT ĐỊNH: Vô hiệu hóa việc ép cờ tối ưu target cho host scripts
-          # Điều này ngăn cờ -O3 bị đẩy vào LLVM option parsing của modpost
+          # ĐÒN QUYẾT ĐỊNH: Vô hiệu hóa việc gán cờ LTO/O3 cho các file trong scripts/mod
+          # Đây là nơi gây ra lỗi "Unknown command line argument '-O3'"
           if [ -f scripts/mod/Makefile ]; then
+              # Xóa dòng gán LTO_CFLAGS cho host tools
               sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
               sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
-              sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
+              # Hạ cấp O3 xuống O2 cho scripts để tránh LLVM Parsing Error
+              sed -i 's/-O3/-O2/g' scripts/mod/Makefile || true
           fi
 
           # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
 
-          # 3. ÉP CONFIG (Tắt LTO để tránh lỗi linker tham số lạ)
+          # 3. ÉP CONFIG (Tắt LTO để ổn định nhất trên Proton Clang)
           scripts/config --file out/.config -d ARM64_LSE_ATOMICS
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
           scripts/config --file out/.config -e INIT_STACK_NONE
@@ -124,11 +126,11 @@ jobs:
              scripts/config --file out/.config -e KSU_NEXT
           fi
           
-          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG
+          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG (Xử lý interactive prompt)
           yes "" | make O=out oldconfig
 
           # 6. BIÊN DỊCH CHÍNH THỨC
-          # Đặt HOSTCFLAGS tối giản để tránh crash modpost
+          # Đặt HOSTCFLAGS tối giản (-O2 -w) để trình biên dịch host không bị crash
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -136,6 +138,7 @@ jobs:
                       AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
                       LD=ld.lld \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
+                      CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
                       HOSTCFLAGS="-O2 -w" \
                       KCFLAGS="-O3 -w -fno-builtin -mno-global-merge"
 
