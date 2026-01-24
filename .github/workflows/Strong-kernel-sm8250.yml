@@ -21,14 +21,16 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     strategy:
+      fail-fast: false
       matrix:
         root_option: [KSU_Next, SukiSU_Ultra, RKSU, No_Root]
 
     name: Build strong (${{ matrix.root_option }})
     
     steps:
-      - name: Checkout
+      - name: Checkout Workflow
         uses: actions/checkout@v4
 
       - name: Setup Environment
@@ -46,30 +48,30 @@ jobs:
           restore-keys: |
             ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-
 
-      - name: Install Proton Clang (Stable Mirror)
+      - name: Install Proton Clang
         run: |
-          mkdir -p $GITHUB_WORKSPACE/clang
-          # Sử dụng Proton Clang bản mới nhất từ kdrag0n
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
+          git clone --depth=1 --single-branch https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
 
       - name: Clone Kernel Source
         run: |
-          git clone --depth=1 ${{ github.event.inputs.KERNEL_TREE }} -b ${{ github.event.inputs.KERNEL_TREE_BRANCH }} $GITHUB_WORKSPACE/kernel
+          git clone --depth=1 --single-branch ${{ github.event.inputs.KERNEL_TREE }} -b ${{ github.event.inputs.KERNEL_TREE_BRANCH }} $GITHUB_WORKSPACE/kernel
           cd $GITHUB_WORKSPACE/kernel
           echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
       - name: Integrate Root Solution
         run: |
           cd $GITHUB_WORKSPACE/kernel
+          # Sử dụng cờ -f để curl trả về lỗi nếu gặp 404, tránh bash chạy file lỗi
           case "${{ matrix.root_option }}" in
             "KSU_Next")
-              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "SukiSU_Ultra")
-              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+              # Kiểm tra lại URL SukiSU, nếu lỗi 404 hãy thử branch chính xác
+              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "RKSU")
-              curl -LSs "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash
+              curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1
               ;;
           esac
 
@@ -85,14 +87,16 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
           
+          # 1. Cấu hình defconfig
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
           
+          # 2. Bật Config Root vào file .config
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
-             echo "CONFIG_KSU=y" >> out/.config
-             echo "CONFIG_KSU_NEXT=y" >> out/.config
+             scripts/config --file out/.config -e KSU
+             scripts/config --file out/.config -e KSU_NEXT
           fi
 
-          # Build với Proton Clang
+          # 3. Biên dịch
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -105,7 +109,7 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           
-          # Nhận diện MIUI của strong568
+          # Logic nhận diện MIUI của strong568
           sed -i '/### AnyKernel setup/a \
           region="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region")" \
           if [ -z "$region" ]; then \
@@ -146,8 +150,8 @@ jobs:
           body: |
             ## strong Kernel for ${{ github.event.inputs.CODENAME }}
             - **Developer:** strong568
-            - **Toolchain:** Proton Clang (kdrag0n)
-            - **Commit:** ${{ env.COMMIT_HASH }}
+            - **Root Option:** ${{ matrix.root_option }}
+            - **Commit Hash:** ${{ env.COMMIT_HASH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
