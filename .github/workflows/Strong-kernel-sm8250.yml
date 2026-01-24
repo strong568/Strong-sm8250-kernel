@@ -54,9 +54,9 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel
           case "${{ matrix.root_option }}" in
             "KSU_Next")
-              # Thử nhánh main, nếu 404 thì thử nhánh master
-              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s main || \
-              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev_susfs/kernel/setup.sh" | bash -s master || exit 1
+              # Thử nhánh main, dev nếu 404 thì thử nhánh master
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s dev || \
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev_susfs/kernel/setup.sh" | bash -s dev_susfs || exit 1
               ;;
             "SukiSU_Ultra")
               curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || \
@@ -94,22 +94,19 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT TRIỆT ĐỂ (Sửa trực tiếp scripts/mod/Makefile)
-          # Xóa toàn bộ các tham số LLVM lạ gây crash modpost/empty.o
+          # 1. PHẪU THUẬT TRIỆT ĐỂ: Xử lý lỗi '-O3' tại scripts/mod
+          # Xóa toàn bộ các tham số LLVM lạ gây crash Proton Clang
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-run-inliner//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/-vectorizer=stripmine//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-run-dce//g' {} + || true
           
-          # ĐÒN QUYẾT ĐỊNH: Vô hiệu hóa việc gán cờ LTO/O3 cho các file trong scripts/mod
-          # Đây là nơi gây ra lỗi "Unknown command line argument '-O3'"
+          # ĐÒN QUYẾT ĐỊNH: Vô hiệu hóa việc gán cờ tối ưu hóa của target cho công cụ build host
           if [ -f scripts/mod/Makefile ]; then
-              # Xóa dòng gán LTO_CFLAGS cho host tools
               sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
               sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
-              # Hạ cấp O3 xuống O2 cho scripts để tránh LLVM Parsing Error
-              sed -i 's/-O3/-O2/g' scripts/mod/Makefile || true
+              # Ép dùng -O2 để trình biên dịch host không bị loạn tham số LLVM
+              sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
           fi
 
           # 2. CẤU HÌNH DEFCONFIG
@@ -141,6 +138,7 @@ jobs:
                       CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
                       HOSTCFLAGS="-O2 -w" \
                       KCFLAGS="-O3 -w -fno-builtin -mno-global-merge"
+
 
 
       - name: Package & Release
