@@ -20,7 +20,6 @@ on:
 
 jobs:
   build:
-    # Hạ cấp xuống 22.04 để tương thích Proton Clang và tránh lỗi RELR/Libc
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -58,18 +57,20 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel
           echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: Integrate Root Solution
+      - name: Integrate Root Solution (Fixed URLs)
         run: |
           cd $GITHUB_WORKSPACE/kernel
           case "${{ matrix.root_option }}" in
             "KSU_Next")
-              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+              # Cập nhật đường dẫn KernelSU-Next chính xác
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "SukiSU_Ultra")
-              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+              # Cập nhật đường dẫn SukiSU-Ultra chính xác
+              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1
               ;;
             "RKSU")
-              curl -LSs "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash
+              curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1
               ;;
           esac
 
@@ -85,26 +86,21 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
           
-          # Dọn dẹp các tham số gây lỗi biên dịch cho Proton Clang
+          # Dọn dẹp cờ gây lỗi cho Proton Clang
           sed -i 's/-regalloc-enable-advisor=release//g' Makefile || true
           find scripts/ -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
           
-          # Khởi tạo config
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
-          
-          # Tắt LTO để tránh lỗi linker tham số lạ
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
           
-          # Bật KSU config
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
              scripts/config --file out/.config -e KSU
              scripts/config --file out/.config -e KSU_NEXT
           fi
           
-          # Tự động trả lời Enter cho các config mới (Memory init, etc.)
+          # Tự động trả lời câu hỏi cấu hình mới
           yes "" | make O=out oldconfig
 
-          # Build với bộ cờ chuẩn
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -159,9 +155,8 @@ jobs:
           body: |
             ## strong Kernel for ${{ github.event.inputs.CODENAME }}
             - **Developer:** strong568
-            - **Toolchain:** Proton Clang
+            - **Root:** ${{ matrix.root_option }}
             - **Commit:** ${{ env.COMMIT_HASH }}
-            - **Note:** Universal AOSP/MIUI (Auto-detect)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
