@@ -1,4 +1,4 @@
-name: Build Kernel strong-sm8250
+name: Build Kernel strong-sm8250-4.19 backport zygisk 
 
 on:
   workflow_dispatch:
@@ -36,17 +36,16 @@ jobs:
       - name: Setup Environment
         run: |
           sudo apt update
-          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl ccache
+          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl ccache
           sudo ln -sf /usr/bin/python3 /usr/bin/python
-          sudo apt install -y libncurses5
 
       - name: Setup CCache
         uses: actions/cache@v4
         with:
           path: /home/runner/.ccache
-          key: ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-${{ github.run_id }}
+          key: ccache-4.19-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-${{ github.run_id }}
           restore-keys: |
-            ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-
+            ccache-4.19-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-
 
       - name: Install Proton Clang
         run: |
@@ -84,24 +83,17 @@ jobs:
           export ARCH=arm64
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
-
-          # FIX LỖI Clang: Loại bỏ tham số regalloc gây crash trên Proton Clang
-          sed -i 's/-regalloc-enable-advisor=release//g' Makefile || true
-          find scripts/ -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-
-          # 1. Cấu hình defconfig
+          
+          # Cấu hình defconfig
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
           
-          # 2. Tự động điền config còn thiếu (Fix lỗi Error in reading or end of file)
-          make O=out olddefconfig
-
-          # 3. Kích hoạt Config Root
+          # Kích hoạt Config Root
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
              scripts/config --file out/.config -e KSU
              scripts/config --file out/.config -e KSU_NEXT
           fi
 
-          # 4. Biên dịch
+          # Biên dịch với các cờ tối ưu cho 4.19 backported
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -133,6 +125,7 @@ jobs:
           sed -i 's/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g' anykernel.sh
           sed -i 's/device.name2=toro/device.name2=munchin/g' anykernel.sh
           
+          # Copy thành phẩm
           cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image .
           [ -f $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dtbo.img ] && cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dtbo.img .
           [ -f $GITHUB_WORKSPACE/kernel/out/vendor_boot.img ] && cp $GITHUB_WORKSPACE/kernel/out/vendor_boot.img .
@@ -151,11 +144,12 @@ jobs:
           files: |
             ${{ env.ZIP_FINAL }}
             ${{ env.MD5_FINAL }}
-          name: strong Kernel - ${{ github.event.inputs.CODENAME }}
-          tag_name: strong-${{ github.event.inputs.CODENAME }}-${{ github.run_id }}
+          name: strong Kernel 4.19 - ${{ github.event.inputs.CODENAME }}
+          tag_name: strong-4.19-${{ github.event.inputs.CODENAME }}-${{ github.run_id }}
           body: |
-            ## strong Kernel for ${{ github.event.inputs.CODENAME }}
+            ## strong Kernel 4.19 for ${{ github.event.inputs.CODENAME }}
             - **Developer:** strong568
+            - **Features:** Backported fixes for Zygisk detection bypass (SBI Yono)
             - **Root:** ${{ matrix.root_option }}
             - **Commit:** ${{ env.COMMIT_HASH }}
         env:
