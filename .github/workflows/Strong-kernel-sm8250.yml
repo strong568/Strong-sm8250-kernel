@@ -49,12 +49,11 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel
           echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: Integrate Root Solution (Fixed URLs & Fallback)
+      - name: Integrate Root Solution
         run: |
           cd $GITHUB_WORKSPACE/kernel
           case "${{ matrix.root_option }}" in
             "KSU_Next")
-              # Thử nhánh main, dev nếu 404 thì thử nhánh master
               curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s dev || \
               curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev_susfs/kernel/setup.sh" | bash -s dev_susfs || exit 1
               ;;
@@ -63,25 +62,33 @@ jobs:
               curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/master/kernel/setup.sh" | bash -s master || exit 1
               ;;
             "RKSU")
-              curl -LSsf "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash || exit 1
+              curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || \
+              curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
               ;;
           esac
+          echo "::notice::Root Solution integrated successfully!"
           
-      - name: Patch Kernel (Super Bank Bypass)
+      - name: Patch Kernel (Bank Bypass & Fixes)
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          # Ẩn trạng thái Unlocked & Orange trong cmdline
+          # 1. Ẩn trạng thái Unlocked & Orange
           find fs/proc/ -name "cmdline.c" -exec sed -i 's/orange/green/g' {} + || true
           find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.verifiedbootstate/androidboot.strong_state/g' {} + || true
           find drivers/soc/qcom/ -name "smem.c" -exec sed -i 's/androidboot.flash.locked/androidboot.strong.locked/g' {} + || true
           
-          # Đổi tên nhận diện KernelSU/ksud để qua mặt các app quét string
+          # 2. Đổi tên KernelSU/ksud ẩn danh
           find . -type f -name "*.c" -exec sed -i 's/KernelSU/strongSU/g' {} + || true
           find . -type f -name "*.c" -exec sed -i 's/ksud/strongd/g' {} + || true
           
-          # Branding tên Kernel
+          # 3. Branding & Makefile Surgery (Sửa lỗi -O3 tại đây luôn)
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -strong-edition/g' Makefile
-
+          find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
+          if [ -f scripts/mod/Makefile ]; then
+              sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
+              sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
+              sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
+          fi
+    
       - name: Build Kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
@@ -94,40 +101,15 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT TRIỆT ĐỂ: Xử lý lỗi '-O3' tại scripts/mod
-          # Xóa toàn bộ các tham số LLVM lạ gây crash Proton Clang
-          find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-run-inliner//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/-vectorizer=stripmine//g' {} + || true
-          
-          # ĐÒN QUYẾT ĐỊNH: Vô hiệu hóa việc gán cờ tối ưu hóa của target cho công cụ build host
-          if [ -f scripts/mod/Makefile ]; then
-              sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
-              sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
-              # Ép dùng -O2 để trình biên dịch host không bị loạn tham số LLVM
-              sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
-          fi
-
-          # 2. CẤU HÌNH DEFCONFIG
+          # 1. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
 
-          # 3. ÉP CONFIG (Tắt LTO để ổn định nhất trên Proton Clang)
-          scripts/config --file out/.config -d ARM64_LSE_ATOMICS
-          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
-          scripts/config --file out/.config -e INIT_STACK_NONE
+          # 2. ÉP CONFIG
+          scripts/config --file out/.config -d ARM64_LSE_ATOMICS -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
+          [ "${{ matrix.root_option }}" != "No_Root" ] && scripts/config --file out/.config -e KSU -e KSU_NEXT
           
-          # 4. KÍCH HOẠT ROOT
-          if [ "${{ matrix.root_option }}" != "No_Root" ]; then
-             scripts/config --file out/.config -e KSU
-             scripts/config --file out/.config -e KSU_NEXT
-          fi
-          
-          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG (Xử lý interactive prompt)
+          # 3. UPDATE CONFIG & BUILD
           yes "" | make O=out oldconfig
-
-          # 6. BIÊN DỊCH CHÍNH THỨC
-          # Đặt HOSTCFLAGS tối giản (-O2 -w) để trình biên dịch host không bị crash
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -139,14 +121,11 @@ jobs:
                       HOSTCFLAGS="-O2 -w" \
                       KCFLAGS="-O3 -w -fno-builtin -mno-global-merge"
 
-
-
       - name: Package & Release
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           sed -i 's/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g' anykernel.sh
-          # Thêm UI thông báo Bank Bypass
           sed -i '/### AnyKernel setup/a ui_print "  -> strong Kernel Applied!"; ui_print "  -> Bank Bypass Patches Active!";' anykernel.sh
           
           cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image .
@@ -154,8 +133,6 @@ jobs:
           
           ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}.zip"
           zip -r9 "../$ZIP_NAME" * -x .git README.md
-          
-          cd ..
           echo "ZIP_FINAL=$ZIP_NAME" >> $GITHUB_ENV
 
       - name: Create Release
