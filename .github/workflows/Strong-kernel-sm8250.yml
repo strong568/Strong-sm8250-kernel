@@ -83,24 +83,21 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT MAKEFILE: Xóa các cờ lỗi gây crash Clang-13
-          # Xóa các cờ liên quan đến advisor và các cờ cảnh báo sai cú pháp
-          sed -i 's/-regalloc-enable-advisor=release//g' Makefile || true
+          # 1. PHẪU THUẬT TRIỆT ĐỂ: Xóa sạch các cờ gây lỗi parsing LLVM
+          # Xóa tham số advisor và sửa lỗi nhận diện -O3 bằng cách làm sạch Makefile
           find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          
-          # Sửa lỗi: unknown argument: '-implicit-function-declaration'
-          # Chúng ta sẽ xóa các đoạn config gây ra lỗi gộp cờ này
           find . -type f -name "Makefile*" -exec sed -i 's/-implicit-function-declaration//g' {} + || true
           find . -type f -name "Makefile*" -exec sed -i 's/=return-type//g' {} + || true
-          find . -type f -name "Makefile*" -exec sed -i 's/=unknown-warning-option//g' {} + || true
-
+          
           # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
 
-          # 3. ÉP CONFIG: Tắt LTO và xử lý Stack Init
-          # Tắt LSE Atomics nếu binutils không hỗ trợ
+          # 3. ÉP CONFIG (Vượt qua đoạn Memory Initialization & LSE Atomics)
+          # Tắt LSE Atomics vì binutils của Proton Clang quá cũ
           scripts/config --file out/.config -d ARM64_LSE_ATOMICS
+          # Tắt LTO để tránh lỗi LLVM Parsing -O3
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
+          # Ép chọn Stack Init None
           scripts/config --file out/.config -e INIT_STACK_NONE
           scripts/config --file out/.config -d INIT_STACK_ALL_PATTERN
           scripts/config --file out/.config -d INIT_STACK_ALL_ZERO
@@ -111,11 +108,11 @@ jobs:
              scripts/config --file out/.config -e KSU_NEXT
           fi
           
-          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG
-          make O=out olddefconfig
+          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG (Xử lý dứt điểm "Error in reading or end of file")
+          yes "" | make O=out oldconfig || make O=out olddefconfig
 
           # 6. BIÊN DỊCH CHÍNH THỨC
-          # Thêm KCFLAGS="-w" để tắt mọi cảnh báo, tránh việc Clang hiểu lầm cờ cảnh báo là lỗi
+          # Sử dụng KCFLAGS="-w" để tắt mọi cảnh báo và ép Clang hiểu đúng tham số
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -125,7 +122,8 @@ jobs:
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
                       KCFLAGS="-w -O3" \
-                      HOSTCFLAGS="-w -O3"
+                      HOSTCFLAGS="-w"
+
 
 
       - name: Package with AnyKernel3
