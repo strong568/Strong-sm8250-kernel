@@ -23,37 +23,44 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rom_target: [AOSP, MIUI_HyperOS]
         root_option: [KSU_Next, SukiSU_Ultra, RKSU, No_Root]
 
-    name: Build strong (${{ matrix.rom_target }} - ${{ matrix.root_option }})
+    name: Build strong (${{ matrix.root_option }})
     
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Environment (Fixed for Noble)
+      - name: Setup Environment
         run: |
           sudo apt update
-          # Cài đặt các thư viện hiện đại cho Ubuntu 24.04
-          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl
-          
-          # Cài đặt thủ công libncurses5 nếu script build yêu cầu bản cũ
-          sudo apt install -y libncurses6 libncursesw6 || true
-          
-          # Tạo liên kết để script dùng 'python' thay cho 'python3'
+          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl ccache
           sudo ln -sf /usr/bin/python3 /usr/bin/python
+          sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 || true
 
-      - name: Install AOSP Clang
+      # --- CẤU HÌNH CCACHE ---
+      - name: Setup CCache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}-
+            ccache-${{ github.event.inputs.CODENAME }}-
+
+      - name: Install Toolchain
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang
           cd $GITHUB_WORKSPACE/clang
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r416183b1.tar.gz
-          tar -xf clang-r416183b1.tar.gz
+          curl -LO "https://raw.githubusercontent.com/ZyCromerZ/Clang/main/scripts/install.sh"
+          chmod +x install.sh
+          ./install.sh . clang-r416183b1
 
       - name: Clone Kernel Source
         run: |
           git clone --depth=1 ${{ github.event.inputs.KERNEL_TREE }} -b ${{ github.event.inputs.KERNEL_TREE_BRANCH }} $GITHUB_WORKSPACE/kernel
+          cd $GITHUB_WORKSPACE/kernel
+          echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
       - name: Integrate Root Solution
         run: |
@@ -73,6 +80,11 @@ jobs:
       - name: Build Kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          # Thiết lập biến môi trường cho CCache
+          export USE_CCACHE=1
+          export CCACHE_DIR=/home/runner/.ccache
+          ccache -M 5G # Giới hạn bộ nhớ cache là 5GB
+          
           cd $GITHUB_WORKSPACE/kernel
           export ARCH=arm64
           export KBUILD_BUILD_USER="strong568"
@@ -85,11 +97,15 @@ jobs:
              echo "CONFIG_KSU_NEXT=y" >> out/.config
           fi
 
+          # Thêm CC="ccache clang" để kích hoạt cache
           make -j$(nproc --all) O=out \
-                      CC=clang \
+                      CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
                       CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                       AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+          
+          # Hiển thị thống kê CCache sau khi build
+          ccache -s
 
       - name: Package with AnyKernel3
         run: |
@@ -104,10 +120,10 @@ jobs:
           fi \
           case "$region" in \
             cn|in|ru|id|eu|tr|tw|gb|global|mx|jp|kr|lm|cl|mi) \
-                ui_print "  -> MIUI/HyperOS Detected!" \
+                ui_print "  -> MIUI/HyperOS ROM is detected!" \
               ;; \
             *) \
-                ui_print "  -> AOSP ROM Detected!" \
+                ui_print "  -> AOSP ROM is detected!" \
               ;; \
           esac' anykernel.sh
 
@@ -118,7 +134,7 @@ jobs:
           [ -f $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dtbo.img ] && cp $GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/dtbo.img .
           [ -f $GITHUB_WORKSPACE/kernel/out/vendor_boot.img ] && cp $GITHUB_WORKSPACE/kernel/out/vendor_boot.img .
 
-          ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ matrix.rom_target }}-${{ matrix.root_option }}.zip"
+          ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}.zip"
           zip -r9 "../$ZIP_NAME" * -x .git README.md
           
           cd ..
@@ -137,7 +153,14 @@ jobs:
           body: |
             ## strong Kernel for ${{ github.event.inputs.CODENAME }}
             - **Developer:** strong568
-            - **Environment:** Ubuntu 24.04 (Noble)
-            - **Build Host:** strong-machine
+            - **Root:** ${{ matrix.root_option }}
+            - **Commit:** ${{ env.COMMIT_HASH }}
+            - **Note:** CCache enabled for faster builds.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf $GITHUB_WORKSPACE/kernel/out
+          rm -rf $GITHUB_WORKSPACE/AnyKernel3
