@@ -49,13 +49,22 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel
           echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: Integrate Root Solution
+      - name: Integrate Root Solution (Fixed URLs)
         run: |
           cd $GITHUB_WORKSPACE/kernel
           case "${{ matrix.root_option }}" in
-            "KSU_Next") curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || exit 1 ;;
-            "SukiSU_Ultra") curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || exit 1 ;;
-            "RKSU") curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1 ;;
+            "KSU_Next")
+              # Thử cả 2 branch main/master để tránh 404
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s main || \
+              curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/master/kernel/setup.sh" | bash -s master || exit 1
+              ;;
+            "SukiSU_Ultra")
+              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || \
+              curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/master/kernel/setup.sh" | bash -s master || exit 1
+              ;;
+            "RKSU")
+              curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1
+              ;;
           esac
           
       - name: Patch Kernel (Super Bank Bypass)
@@ -85,36 +94,41 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # PHẪU THUẬT TRIỆT ĐỂ: Xóa sạch các cờ LLVM gây crash mod/empty.o
-          # Quét tất cả các file có khả năng chứa cờ mllvm
-          find . -type f -name "*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          find . -type f -name "*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
-          find . -type f -name "*" -exec sed -i 's/-run-inliner//g' {} + || true
-          find . -type f -name "*" -exec sed -i 's/-vectorizer=stripmine//g' {} + || true
-          find . -type f -name "*" -exec sed -i 's/-run-dce//g' {} + || true
-          find . -type f -name "*" -exec sed -i 's/-mllvm -polly//g' {} + || true
+          # 1. PHẪU THUẬT TRIỆT ĐỂ: Xóa các cờ LLVM lạ gây crash Proton Clang
+          # Quét và xóa các cờ mllvm không tương thích trong toàn bộ cây thư mục scripts
+          find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-invariant-load-hoisting//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-run-inliner//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-vectorizer=stripmine//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-run-dce//g' {} + || true
           
-          # Đặc trị scripts/mod/Makefile
+          # ĐÒN QUYẾT ĐỊNH: Vô hiệu hóa việc ép cờ tối ưu target cho host scripts
+          # Điều này ngăn cờ -O3 bị đẩy vào LLVM option parsing của modpost
           if [ -f scripts/mod/Makefile ]; then
-              sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile
-              sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile
+              sed -i 's/HOSTCFLAGS_empty.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
+              sed -i 's/HOSTCFLAGS_mk_elfconfig.o := $(LTO_CFLAGS)//g' scripts/mod/Makefile || true
               sed -i '/_CFLAGS/s/-O3/-O2/g' scripts/mod/Makefile || true
           fi
 
-          # Khởi tạo config
+          # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
 
-          # Ép cấu hình Memory Initialization và tắt LTO
-          scripts/config --file out/.config -d ARM64_LSE_ATOMICS -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
+          # 3. ÉP CONFIG (Tắt LTO để tránh lỗi linker tham số lạ)
+          scripts/config --file out/.config -d ARM64_LSE_ATOMICS
+          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
+          scripts/config --file out/.config -e INIT_STACK_NONE
           
+          # 4. KÍCH HOẠT ROOT
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
-             scripts/config --file out/.config -e KSU -e KSU_NEXT
+             scripts/config --file out/.config -e KSU
+             scripts/config --file out/.config -e KSU_NEXT
           fi
           
-          # Lệnh yes "" cực kỳ quan trọng để vượt qua interactive prompt nếu scripts/config thất bại
-          yes "" | make O=out oldconfig || make O=out olddefconfig
+          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG
+          yes "" | make O=out oldconfig
 
-          # Biên dịch chính thức
+          # 6. BIÊN DỊCH CHÍNH THỨC
+          # Đặt HOSTCFLAGS tối giản để tránh crash modpost
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -124,6 +138,7 @@ jobs:
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       HOSTCFLAGS="-O2 -w" \
                       KCFLAGS="-O3 -w -fno-builtin -mno-global-merge"
+
 
       - name: Package & Release
         run: |
