@@ -1,0 +1,171 @@
+name: Build Kernel strong-sm8250 gpt
+
+on:
+  workflow_dispatch:
+    inputs:
+      CODENAME:
+        description: "Select Phone Codename"
+        type: choice
+        required: true
+        default: munch
+        options:
+          - munch
+          - alioth
+          - umi
+          - lmi
+
+      KERNEL_TREE:
+        description: "Kernel Tree URL"
+        required: true
+        default: "https://github.com/EmanuelCN/kernel_xiaomi_sm8250"
+
+      KERNEL_TREE_BRANCH:
+        description: "Kernel Tree Branch"
+        required: true
+        default: "staging"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        root_option:
+          - KSU_Next
+          - SukiSU_Ultra
+          - RKSU
+          - No_Root
+
+    name: Build strong (${{ matrix.root_option }})
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc bison build-essential flex g++-multilib gcc-multilib \
+            git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev \
+            liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 curl ccache libncurses5
+          sudo ln -sf /usr/bin/python3 /usr/bin/python
+
+      - name: Setup CCache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}
+          restore-keys: |
+            ccache-${{ github.event.inputs.CODENAME }}-
+
+      - name: Install Proton Clang
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=1 \
+            -b "${{ github.event.inputs.KERNEL_TREE_BRANCH }}" \
+            "${{ github.event.inputs.KERNEL_TREE }}" kernel
+          cd kernel
+          echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Integrate Root Solution
+        run: |
+          cd kernel
+          case "${{ matrix.root_option }}" in
+            KSU_Next)
+              curl -LSsf https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh | bash -s main
+              ;;
+            SukiSU_Ultra)
+              curl -LSsf https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s main
+              ;;
+            RKSU)
+              curl -LSsf https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh | bash
+              ;;
+            No_Root)
+              echo ">> Build without root"
+              ;;
+          esac
+
+      - name: Build Kernel
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export USE_CCACHE=1
+          export CCACHE_DIR=~/.ccache
+          ccache -M 5G
+
+          cd kernel
+          export ARCH=arm64
+          export KBUILD_BUILD_USER=strong568
+          export KBUILD_BUILD_HOST=strong-machine
+
+          # Fix clang flags crash
+          find . -name "Makefile*" -exec sed -i \
+            -e 's/-regalloc-enable-advisor=release//g' \
+            -e 's/-implicit-function-declaration//g' \
+            -e 's/=return-type//g' \
+            -e 's/=unknown-warning-option//g' {} +
+
+          make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
+
+          scripts/config --file out/.config -d ARM64_LSE_ATOMICS
+          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
+          scripts/config --file out/.config -e INIT_STACK_NONE
+          scripts/config --file out/.config -d INIT_STACK_ALL_PATTERN
+          scripts/config --file out/.config -d INIT_STACK_ALL_ZERO
+
+          if [ "${{ matrix.root_option }}" != "No_Root" ]; then
+            scripts/config --file out/.config -e KSU
+          fi
+
+          make O=out olddefconfig
+
+          make -j$(nproc) O=out \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            KCFLAGS="-w -O3" HOSTCFLAGS="-w -O3"
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+          cd AnyKernel3
+
+          sed -i "s/device.name1=.*/device.name1=${{ github.event.inputs.CODENAME }}/" anykernel.sh
+
+          cp ../kernel/out/arch/arm64/boot/Image .
+          [ -f ../kernel/out/arch/arm64/boot/dtbo.img ] && cp ../kernel/out/arch/arm64/boot/dtbo.img .
+          [ -f ../kernel/out/vendor_boot.img ] && cp ../kernel/out/vendor_boot.img .
+
+          ZIP_NAME="strong-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}.zip"
+          zip -r9 "../$ZIP_NAME" * -x .git README.md
+          cd ..
+
+          md5sum "$ZIP_NAME" > "$ZIP_NAME.md5"
+          echo "ZIP_FINAL=$ZIP_NAME" >> $GITHUB_ENV
+          echo "MD5_FINAL=$ZIP_NAME.md5" >> $GITHUB_ENV
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: strong-${{ github.event.inputs.CODENAME }}-${{ matrix.root_option }}
+          name: strong Kernel – ${{ github.event.inputs.CODENAME }} (${{ matrix.root_option }})
+          files: |
+            ${{ env.ZIP_FINAL }}
+            ${{ env.MD5_FINAL }}
+          body: |
+            **Device:** ${{ github.event.inputs.CODENAME }}
+            **Root:** ${{ matrix.root_option }}
+            **Commit:** ${{ env.COMMIT_HASH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
