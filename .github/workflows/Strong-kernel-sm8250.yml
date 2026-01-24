@@ -71,7 +71,6 @@ jobs:
               curl -LSsf "https://raw.githubusercontent.com/rsuntk/RKSU/main/setup.sh" | bash || exit 1
               ;;
           esac
-
       - name: Build Kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
@@ -84,22 +83,27 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT MAKEFILE NÂNG CAO
-          # Loại bỏ các tham số LLVM không tương thích với Proton Clang
+          # 1. PHẪU THUẬT MAKEFILE: Xóa các cờ lỗi gây crash Clang-13
+          # Xóa các cờ liên quan đến advisor và các cờ cảnh báo sai cú pháp
           sed -i 's/-regalloc-enable-advisor=release//g' Makefile || true
-          find scripts/ -type f -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          # Fix lỗi "-O3" lạ lùng bằng cách xóa các cờ tối ưu hóa LTO gây nhiễu
-          find . -type f -name "Makefile*" -exec sed -i 's/-Werror//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
+          
+          # Sửa lỗi: unknown argument: '-implicit-function-declaration'
+          # Chúng ta sẽ xóa các đoạn config gây ra lỗi gộp cờ này
+          find . -type f -name "Makefile*" -exec sed -i 's/-implicit-function-declaration//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/=return-type//g' {} + || true
+          find . -type f -name "Makefile*" -exec sed -i 's/=unknown-warning-option//g' {} + || true
 
           # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
 
-          # 3. ÉP CẤU HÌNH (Vượt qua đoạn Memory Initialization)
+          # 3. ÉP CONFIG: Tắt LTO và xử lý Stack Init
+          # Tắt LSE Atomics nếu binutils không hỗ trợ
+          scripts/config --file out/.config -d ARM64_LSE_ATOMICS
+          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
           scripts/config --file out/.config -e INIT_STACK_NONE
           scripts/config --file out/.config -d INIT_STACK_ALL_PATTERN
           scripts/config --file out/.config -d INIT_STACK_ALL_ZERO
-          # Tắt LTO để build mượt hơn
-          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
           
           # 4. KÍCH HOẠT ROOT
           if [ "${{ matrix.root_option }}" != "No_Root" ]; then
@@ -111,7 +115,7 @@ jobs:
           make O=out olddefconfig
 
           # 6. BIÊN DỊCH CHÍNH THỨC
-          # Thêm CLANG_TRIPLE và ép trình linker LD
+          # Thêm KCFLAGS="-w" để tắt mọi cảnh báo, tránh việc Clang hiểu lầm cờ cảnh báo là lỗi
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
@@ -120,7 +124,9 @@ jobs:
                       LD=ld.lld \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-                      KCFLAGS="-w"
+                      KCFLAGS="-w -O3" \
+                      HOSTCFLAGS="-w -O3"
+
 
       - name: Package with AnyKernel3
         run: |
