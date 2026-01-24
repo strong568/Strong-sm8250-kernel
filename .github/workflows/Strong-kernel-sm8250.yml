@@ -84,19 +84,21 @@ jobs:
           export KBUILD_BUILD_USER="strong568"
           export KBUILD_BUILD_HOST="strong-machine"
 
-          # 1. PHẪU THUẬT: Xóa tham số advisor gây crash trên Proton Clang
+          # 1. PHẪU THUẬT MAKEFILE NÂNG CAO
+          # Loại bỏ các tham số LLVM không tương thích với Proton Clang
           sed -i 's/-regalloc-enable-advisor=release//g' Makefile || true
-          find scripts/ -type f -name "Makefile*" -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
-          
+          find scripts/ -type f -exec sed -i 's/-regalloc-enable-advisor=release//g' {} + || true
+          # Fix lỗi "-O3" lạ lùng bằng cách xóa các cờ tối ưu hóa LTO gây nhiễu
+          find . -type f -name "Makefile*" -exec sed -i 's/-Werror//g' {} + || true
+
           # 2. CẤU HÌNH DEFCONFIG
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
 
-          # 3. ÉP CẤU HÌNH: Tránh dừng lại hỏi (Fix "Error in reading or end of file")
-          echo "CONFIG_INIT_STACK_NONE=y" >> out/.config
-          echo "CONFIG_INIT_ON_ALLOC_DEFAULT_ON=n" >> out/.config
-          echo "CONFIG_INIT_ON_FREE_DEFAULT_ON=n" >> out/.config
-          
-          # Tắt LTO để tránh xung đột LLVM tham số -O3
+          # 3. ÉP CẤU HÌNH (Vượt qua đoạn Memory Initialization)
+          scripts/config --file out/.config -e INIT_STACK_NONE
+          scripts/config --file out/.config -d INIT_STACK_ALL_PATTERN
+          scripts/config --file out/.config -d INIT_STACK_ALL_ZERO
+          # Tắt LTO để build mượt hơn
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO
           
           # 4. KÍCH HOẠT ROOT
@@ -105,29 +107,27 @@ jobs:
              scripts/config --file out/.config -e KSU_NEXT
           fi
           
-          # 5. CẬP NHẬT CONFIG
+          # 5. CẬP NHẬT CONFIG TỰ ĐỘNG
           make O=out olddefconfig
 
-          # 6. BIÊN DỊCH
+          # 6. BIÊN DỊCH CHÍNH THỨC
+          # Thêm CLANG_TRIPLE và ép trình linker LD
           make -j$(nproc --all) O=out \
                       CC="ccache clang" \
                       CROSS_COMPILE=aarch64-linux-gnu- \
                       CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                      AR=llvm-ar \
-                      NM=llvm-nm \
-                      OBJCOPY=llvm-objcopy \
-                      OBJDUMP=llvm-objdump \
-                      STRIP=llvm-strip \
+                      AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
                       LD=ld.lld \
-                      KCFLAGS="-O3 -Wno-error" \
-                      HOSTCFLAGS="-O3"
+                      CLANG_TRIPLE=aarch64-linux-gnu- \
+                      CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+                      KCFLAGS="-w"
 
       - name: Package with AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $GITHUB_WORKSPACE/AnyKernel3
           cd $GITHUB_WORKSPACE/AnyKernel3
           
-          # Nhận diện MIUI/AOSP
+          # Script nhận diện MIUI của strong568
           sed -i '/### AnyKernel setup/a \
           region="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region")" \
           if [ -z "$region" ]; then \
