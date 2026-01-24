@@ -1,4 +1,4 @@
-name: Build Kernel strong-sm8250
+name: Build Kernel strong-sm8250 python2
 
 on:
   workflow_dispatch:
