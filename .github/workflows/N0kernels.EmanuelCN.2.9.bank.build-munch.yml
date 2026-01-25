@@ -1,0 +1,129 @@
+name: N0kernels 2.9 Build (SM8250) Bank detections
+
+on:
+  workflow_dispatch:
+    inputs:
+      CODENAME:
+        description: 'Mã máy (munch, alioth, umi, lmi)'
+        default: 'munch'
+        required: true
+      ROOT_CHOICE:
+        description: 'Chọn bản Root muốn build'
+        type: choice
+        default: 'KSU_Next'
+        options:
+          - KSU_Next
+          - SukiSU_Ultra
+          - RKSU
+          - No_Root
+      KERNEL_TREE:
+        description: "Link Kernel Source"
+        default: "https://github.com/Impqxr/kernel_xiaomi_sm8250"
+        required: true
+      KERNEL_TREE_BRANCH:
+        description: "Nhánh (Branch)"
+        default: "base-bpf"
+        required: true
+      PRIMARY_CLANG_URL:
+        description: "Clang chính (AOSP Clang)"
+        default: "https://github.com/Impqxr/aosp_clang_ci/releases/download/13289611/clang-13289611-linux-x86.tar.xz"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Bước mới: Giải phóng dung lượng và dọn dẹp môi trường GitHub Runner
+      - name: Dọn dẹp môi trường build sạch
+        run: |
+          sudo docker image prune -a -f
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Cài đặt công cụ Build
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl ccache
+          sudo apt install -y libncurses6 || sudo apt install -y libncursesw5 || true
+          [ ! -f /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 || true
+          sudo ln -sf /usr/bin/python3 /usr/bin/python
+
+      - name: Tải Toolchain
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/clang
+          wget "${{ github.event.inputs.PRIMARY_CLANG_URL }}" -O clang.tar.xz
+          tar -xf clang.tar.xz -C $GITHUB_WORKSPACE/clang --strip-components=1
+
+      - name: Tải Kernel Source (Clone mới hoàn toàn)
+        run: |
+          git clone --depth=1 ${{ github.event.inputs.KERNEL_TREE }} -b ${{ github.event.inputs.KERNEL_TREE_BRANCH }} kernel_tree
+
+      - name: Tích hợp Root & Hardening (Shopee/MB Bypass)
+        working-directory: kernel_tree
+        run: |
+          # 1. Tích hợp Root
+          case "${{ github.event.inputs.ROOT_CHOICE }}" in
+            "KSU_Next") curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy ;;
+            "SukiSU_Ultra") curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main ;;
+            "RKSU") curl -LSsf "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash ;;
+          esac
+
+          # 2. Obfuscation (Đổi tên chuỗi nhận diện Root)
+          KSU_PATH=$(find . -maxdepth 3 -type d -name "*ernelsu*" | head -n 1)
+          if [ ! -z "$KSU_PATH" ]; then
+            find "$KSU_PATH" -type f -exec sed -i 's/KernelSU/StrongSU/g; s/ksud/strongd/g' {} +
+          fi
+
+          # 3. Patch Bootloader Status
+          [ -f fs/proc/cmdline.c ] && sed -i 's/orange/green/g' fs/proc/cmdline.c
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -strong-N0kernel/g' Makefile
+
+      - name: Build Kernel
+        working-directory: kernel_tree
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export ARCH=arm64
+          export KBUILD_BUILD_USER="android-build"
+          export KBUILD_BUILD_HOST="xiaomi-dev"
+          # Dọn dẹp output cũ trước khi build (đảm bảo build sạch)
+          make clean
+          make mrproper
+          mkdir -p out
+          make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
+          scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
+          [ "${{ github.event.inputs.ROOT_CHOICE }}" != "No_Root" ] && scripts/config --file out/.config -e KSU -e KSU_NEXT
+          make -j$(nproc --all) O=out CC="clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 KCFLAGS="-O3 -w -fno-builtin"
+
+      - name: Đóng gói AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          cd AnyKernel3
+          sed -i "s/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g" anykernel.sh
+          sed -i '/## AnyKernel install/a dump_boot;\npatch_cmdline "androidboot.verifiedbootstate" "androidboot.verifiedbootstate=green";\npatch_cmdline "androidboot.flash.locked" "androidboot.flash.locked=1";\nwrite_boot;' anykernel.sh
+          cp ../kernel_tree/out/arch/arm64/boot/Image .
+          [ -f ../kernel_tree/out/arch/arm64/boot/dtbo.img ] && cp ../kernel_tree/out/arch/arm64/boot/dtbo.img .
+          zip -r9 "../N0-Bank-${{ github.event.inputs.CODENAME }}-${{ github.event.inputs.ROOT_CHOICE }}.zip" * -x .git README.md
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
+          name: N0-Bank-Build-${{ github.event.inputs.CODENAME }}
+          tag_name: Build-${{ github.run_id }}
+          body: "Bản build sạch (Clean build) hỗ trợ Shopee & MB Bank."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dọn dẹp sau khi build (Clean Workspace)
+        if: always()
+        run: |
+          rm -rf kernel_tree AnyKernel3 clang
+          df -h
