@@ -41,7 +41,7 @@ jobs:
     
     steps:
       - name: Checkout
-        uses: checkout@v4
+        uses: actions/checkout@v4 
 
       - name: Cài đặt công cụ Build & Fix libncurses
         run: |
@@ -70,8 +70,8 @@ jobs:
       - name: Tích hợp Root & Hardened Patches (Bank Bypass)
         working-directory: kernel_tree
         run: |
-          # 1. Áp dụng bản vá ptrace (Fix SBI Yono / Zygisk)
-          cat <<EOF > ptrace_yono.patch
+          # 1. Tạo và áp dụng bản vá ptrace (Fix SBI Yono / Zygisk)
+          cat <<'EOF' > ptrace_yono.patch
           --- a/include/linux/ptrace.h
           +++ b/include/linux/ptrace.h
           @@ -47,7 +47,7 @@
@@ -96,9 +96,8 @@ jobs:
           --- a/kernel/signal.c
           +++ b/kernel/signal.c
           @@ -1921,7 +1921,8 @@
-           static void ptrace_stop(int exit_code, int why, int clear_code,
-          -	siginfo_t *info)
-          +	unsigned long message, siginfo_t *info)
+           -static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
+          +static void ptrace_stop(int exit_code, int why, int clear_code, unsigned long message, siginfo_t *info)
            {
           @@ -1967,6 +1968,7 @@
            	smp_wmb();
@@ -110,9 +109,9 @@ jobs:
            	current->last_siginfo = NULL;
           +	current->ptrace_message = 0;
           EOF
-          patch -p1 < ptrace_yono.patch || echo "Cảnh báo: Patch ptrace không khớp hoàn toàn, nhưng hãy thử build tiếp."
+          patch -p1 < ptrace_yono.patch || echo "Patch ptrace apply failed, but continuing..."
 
-          # 2. Tích hợp Root
+          # 2. Tích hợp Root dựa trên lựa chọn
           case "${{ github.event.inputs.ROOT_CHOICE }}" in
             "KSU_Next") curl -LSsf "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy ;;
             "SukiSU_Ultra") curl -LSsf "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main ;;
@@ -123,10 +122,10 @@ jobs:
           [ -f fs/proc/cmdline.c ] && sed -i 's/orange/green/g' fs/proc/cmdline.c
           
           if [ "${{ github.event.inputs.ROOT_CHOICE }}" != "No_Root" ]; then
-            KSU_PATH=\$(find . -maxdepth 3 -type d -name "*ernelsu*" | head -n 1)
-            if [ ! -z "\$KSU_PATH" ]; then
-              find \$KSU_PATH -type f -exec sed -i 's/KernelSU/strongSU/g' {} +
-              find \$KSU_PATH -type f -exec sed -i 's/ksud/strongd/g' {} +
+            KSU_PATH=$(find . -maxdepth 3 -type d -name "*ernelsu*" | head -n 1)
+            if [ ! -z "$KSU_PATH" ]; then
+              find "$KSU_PATH" -type f -exec sed -i 's/KernelSU/strongSU/g' {} +
+              find "$KSU_PATH" -type f -exec sed -i 's/ksud/strongd/g' {} +
             fi
           fi
           
@@ -160,7 +159,7 @@ jobs:
           files: "*.zip"
           name: N0-Bank-Build-${{ github.event.inputs.CODENAME }}
           tag_name: Build-${{ github.run_id }}
-          body: "Build hoàn tất với ptrace hardening và bank bypass."
+          body: "Build hoàn tất với ptrace hardening và bank bypass cho SM8250."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
