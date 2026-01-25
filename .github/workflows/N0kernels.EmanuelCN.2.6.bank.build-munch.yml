@@ -46,7 +46,7 @@ jobs:
       - name: Cài đặt công cụ Build & Fix libncurses
         run: |
           sudo apt update
-          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl ccache
+          sudo apt install -y bc bison build-essential flex g++-multilib gcc-multilib git gnupg gperf libncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush rsync micro schedtool squashfs-tools xsltproc zip zlib1g-dev python3 curl ccache
           sudo apt install -y libncurses6 || sudo apt install -y libncursesw5 || true
           [ ! -f /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5 || true
           sudo ln -sf /usr/bin/python3 /usr/bin/python
@@ -70,46 +70,20 @@ jobs:
       - name: Tích hợp Root & Hardened Patches (Bank Bypass)
         working-directory: kernel_tree
         run: |
-          # 1. Tạo và áp dụng bản vá ptrace (Fix SBI Yono / Zygisk)
-          cat <<'EOF' > ptrace_yono.patch
-          --- a/include/linux/ptrace.h
-          +++ b/include/linux/ptrace.h
-          @@ -47,7 +47,7 @@
-           extern void ptrace_disable(struct task_struct *);
-           extern int ptrace_request(struct task_struct *child, long request,
-           			  unsigned long addr, unsigned long data);
-          -extern void ptrace_notify(int exit_code);
-          +extern void ptrace_notify(int exit_code, unsigned long message);
-           extern void __ptrace_link(struct task_struct *child,
-           			  struct task_struct *new_parent,
-           			  const struct cred *ptracer_cred);
-          @@ -142,8 +142,7 @@
-           static inline void ptrace_event(int event, unsigned long message)
-           {
-           	if (unlikely(ptrace_event_enabled(current, event))) {
-          -		current->ptrace_message = message;
-          -		ptrace_notify((event << 8) | SIGTRAP);
-          +		ptrace_notify((event << 8) | SIGTRAP, message);
-           	} else if (event == PTRACE_EVENT_EXEC) {
-           		/* legacy EXEC report via SIGTRAP */
-           		if ((current->ptrace & (PT_PTRACED|PT_SEIZED)) == PT_PTRACED)
-          --- a/kernel/signal.c
-          +++ b/kernel/signal.c
-          @@ -1921,7 +1921,8 @@
-           -static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
-          +static void ptrace_stop(int exit_code, int why, int clear_code, unsigned long message, siginfo_t *info)
-           {
-          @@ -1967,6 +1968,7 @@
-           	smp_wmb();
-          +	current->ptrace_message = message;
-           	current->last_siginfo = info;
-           	current->exit_code = exit_code;
-          @@ -2043,6 +2045,7 @@
-           	spin_lock_irq(&current->sighand->siglock);
-           	current->last_siginfo = NULL;
-          +	current->ptrace_message = 0;
-          EOF
-          patch -p1 < ptrace_yono.patch || echo "Patch ptrace apply failed, but continuing..."
+          # 1. Patch ptrace Fix SBI Yono / Zygisk bằng sed (An toàn hơn patch file)
+          # Sửa prototype trong header và thêm Macro hỗ trợ code cũ (tránh lỗi too few arguments)
+          sed -i 's/extern void ptrace_notify(int exit_code);/extern void ptrace_notify(int exit_code, unsigned long message);\n#define ptrace_notify(exit_code, ...) (ptrace_notify)(exit_code, ##__VA_ARGS__, 0)/g' include/linux/ptrace.h
+          
+          # Sửa ptrace_event trong header
+          sed -i 's/ptrace_notify((event << 8) | SIGTRAP);/ptrace_notify((event << 8) | SIGTRAP, message);/g' include/linux/ptrace.h
+
+          # Sửa định nghĩa hàm và logic trong kernel/signal.c
+          # Tìm dòng void ptrace_stop và thêm tham số message
+          sed -i 's/static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t \*info)/static void ptrace_stop(int exit_code, int why, int clear_code, unsigned long message, siginfo_t \*info)/g' kernel/signal.c
+          # Cập nhật lời gọi ptrace_stop bên trong ptrace_notify
+          sed -i 's/ptrace_stop(exit_code, why, 1, \&info);/ptrace_stop(exit_code, why, 1, message, \&info);/g' kernel/signal.c
+          # Cập nhật ptrace_message trước khi stop
+          sed -i '/current->exit_code = exit_code;/a \	current->ptrace_message = message;' kernel/signal.c
 
           # 2. Tích hợp Root dựa trên lựa chọn
           case "${{ github.event.inputs.ROOT_CHOICE }}" in
@@ -139,6 +113,7 @@ jobs:
           export KBUILD_BUILD_USER="${{ github.actor }}"
           export KBUILD_BUILD_HOST="github.com"
           make O=out vendor/${{ github.event.inputs.CODENAME }}_defconfig
+          # Tắt LTO để tránh lỗi linker nếu toolchain không tương thích hoàn toàn
           scripts/config --file out/.config -d LTO -d LTO_CLANG -d THINLTO -e INIT_STACK_NONE
           [ "${{ github.event.inputs.ROOT_CHOICE }}" != "No_Root" ] && scripts/config --file out/.config -e KSU -e KSU_NEXT
           make -j$(nproc --all) O=out CC="clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 KCFLAGS="-O3 -w -fno-builtin"
@@ -148,6 +123,7 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
           cd AnyKernel3
           sed -i "s/device.name1=maguro/device.name1=${{ github.event.inputs.CODENAME }}/g" anykernel.sh
+          # Fake boot state để bypass một số app ngân hàng kiểm tra bootloader
           sed -i '/## AnyKernel install/a dump_boot;\npatch_cmdline "androidboot.verifiedbootstate" "androidboot.verifiedbootstate=green";\npatch_cmdline "androidboot.flash.locked" "androidboot.flash.locked=1";\nwrite_boot;' anykernel.sh
           cp ../kernel_tree/out/arch/arm64/boot/Image .
           [ -f ../kernel_tree/out/arch/arm64/boot/dtbo.img ] && cp ../kernel_tree/out/arch/arm64/boot/dtbo.img .
@@ -159,7 +135,12 @@ jobs:
           files: "*.zip"
           name: N0-Bank-Build-${{ github.event.inputs.CODENAME }}
           tag_name: Build-${{ github.run_id }}
-          body: "Build hoàn tất với ptrace hardening và bank bypass cho SM8250."
+          body: |
+            ### Thông tin Build
+            - **Thiết bị**: ${{ github.event.inputs.CODENAME }}
+            - **Root**: ${{ github.event.inputs.ROOT_CHOICE }}
+            - **Hardening**: Ptrace patched, Bootloader spoofing (green/locked)
+            - **Kernel Version**: SM8250 2.6 Custom
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
