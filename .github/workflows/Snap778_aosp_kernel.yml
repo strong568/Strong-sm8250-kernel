@@ -1,0 +1,91 @@
+name: Build Kernel SM7325 (KSUN + ReSuKisu)
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cài đặt công cụ Build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex git libssl-dev python3 rsync zip curl
+
+      - name: Clone Kernel Source (Staging)
+        run: |
+          git clone --depth=1 https://github.com/NSR-XINE/kernel_qcom_lahaina -b staging kernel-src
+
+      - name: Clone AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/NSR-XINE/AnyKernel3 anykernel
+
+      - name: Cài đặt Proton Clang
+        run: |
+          mkdir clang
+          curl -Lo clang.tar.gz https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz
+          tar -C clang -xf clang.tar.gz --strip-components=1
+
+      - name: Tích hợp KernelSU Next & ReSuKisu
+        run: |
+          cd kernel-src
+          
+          # 1. Cài đặt KernelSU Next trước
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+          
+          # 2. Cài đặt ReSuKisu (Tích hợp thêm các bản vá bảo mật/ẩn root)
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -
+          
+      - name: Build Kernel
+        run: |
+          export PATH=$(pwd)/clang/bin:$PATH
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_USER="Gemini"
+          export KBUILD_BUILD_HOST="CI-Server"
+          
+          cd kernel-src
+          
+          # Sử dụng config cho Lisa (SM7325)
+          DEFCONFIG=vendor/lisa-perf_defconfig
+          
+          make O=out $DEFCONFIG
+          
+          # Bật các tùy chọn quan trọng cho KSU và ẩn root
+          scripts/config --file out/.config -e CONFIG_KSU
+          scripts/config --file out/.config -e CONFIG_KSU_NEXT
+          scripts/config --file out/.config -e CONFIG_OVERLAY_FS
+          
+          make -j$(nproc --all) O=out \
+               CC=clang \
+               LLVM=1 \
+               LLVM_IAS=1 \
+               CROSS_COMPILE=aarch64-linux-gnu- \
+               CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+      - name: Đóng gói AnyKernel3
+        run: |
+          IMAGE=kernel-src/out/arch/arm64/boot/Image
+          DTBO=kernel-src/out/arch/arm64/boot/dtbo.img
+          
+          if [ -f $IMAGE ]; then
+            cp $IMAGE anykernel/
+            [ -f $DTBO ] && cp $DTBO anykernel/
+            
+            cd anykernel
+            # Tự động nhận diện thiết bị Lisa
+            sed -i 's/device.name1=auto/device.name1=lisa/g' anykernel.sh
+            zip -r9 ../Kernel-Lisa-ReSuKisu.zip * -x .git README.md
+          else
+            echo "Lỗi: Build thất bại!"
+            exit 1
+          fi
+
+      - name: Upload sản phẩm
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-SM7325-ReSuKisu
+          path: Kernel-Lisa-ReSuKisu.zip
+          
