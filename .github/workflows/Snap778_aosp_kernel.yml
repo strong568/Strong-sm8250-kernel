@@ -28,16 +28,16 @@ jobs:
           curl -Lo clang.tar.gz https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz
           tar -C clang -xf clang.tar.gz --strip-components=1
 
-      - name: Tích hợp KernelSU Next & ReSuKisu
+      - name: Tích hợp KSUN & ReSuKisu
         run: |
           cd kernel-src
           
-          # 1. Cài đặt KernelSU Next trước
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+          # 1. Tải và chạy script của KernelSU Next (Sử dụng link trực tiếp từ repo)
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
           
-          # 2. Cài đặt ReSuKisu (Tích hợp thêm các bản vá bảo mật/ẩn root)
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -
-          
+          # 2. Tải và chạy script của ReSuKisu
+          # Lưu ý: Nếu link chính bị 404, chúng ta dùng link dự phòng hoặc link commit cụ thể
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
       - name: Build Kernel
         run: |
           export PATH=$(pwd)/clang/bin:$PATH
